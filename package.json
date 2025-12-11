@@ -4,10 +4,10 @@
   "type": "module",
   "main": "server-modular.js",
   "scripts": {
-    "start": "node server-modular.js",
-    "start:old": "node server.js",
-    "dev": "nodemon server-modular.js",
-    "dev:old": "nodemon server.js"
+    "start": "node server.js",
+    "start:modular": "node server-modular.js",
+    "dev": "nodemon server.js",
+    "dev:modular": "nodemon server-modular.js"
   },
   "dependencies": {
     "express": "^4.18.2",

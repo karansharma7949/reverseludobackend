@@ -25,6 +25,8 @@ router.post('/create', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'Invalid number of players (must be 2-6)' });
     }
 
+    console.log('🏠 Creating friend room for', noOfPlayers, 'players');
+
     let roomCode;
     let isUnique = false;
     while (!isUnique) {
@@ -37,9 +39,10 @@ router.post('/create', authenticateUser, async (req, res) => {
       if (!existing) isUnique = true;
     }
 
-    const colors = ['red', 'blue', 'green', 'yellow', 'orange', 'purple'];
-    const players = { [userId]: colors[0] };
-    const positions = { [colors[0]]: { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 } };
+    // Use assignColor helper for consistent anti-clockwise turn order
+    const firstColor = assignColor({}, noOfPlayers);
+    const players = { [userId]: firstColor };
+    const positions = { [firstColor]: { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 } };
 
     const { data: friendRoom, error } = await supabaseAdmin
       .from('friend_rooms')
@@ -53,11 +56,14 @@ router.post('/create', authenticateUser, async (req, res) => {
         game_state: 'waiting',
         dice_state: 'waiting',
         pending_steps: {},
+        consecutive_sixes: {},
         winners: [],
         dare: dare || null,
       })
       .select()
       .single();
+    
+    console.log('✅ Friend room created:', roomCode);
 
     if (error) throw error;
 
@@ -96,9 +102,8 @@ router.post('/:roomCode/join', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'Room is full' });
     }
 
-    const colors = ['red', 'blue', 'green', 'yellow', 'orange', 'purple'];
-    const usedColors = Object.values(friendRoom.players);
-    const nextColor = colors.find(c => !usedColors.includes(c));
+    // Use assignColor helper for consistent anti-clockwise turn order
+    const nextColor = assignColor(friendRoom.players, friendRoom.no_of_players);
 
     const updatedPlayers = { ...friendRoom.players, [userId]: nextColor };
     const updatedPositions = {
@@ -194,7 +199,7 @@ router.post('/:roomCode/leave', authenticateUser, async (req, res) => {
   }
 });
 
-// Start friend game
+// Start friend game (NO bots - friends only)
 router.post('/:roomCode/start', authenticateUser, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -214,23 +219,28 @@ router.post('/:roomCode/start', authenticateUser, async (req, res) => {
       return res.status(403).json({ error: 'Only host can start the game' });
     }
 
-    if (Object.keys(friendRoom.players).length < 2) {
+    const playerIds = Object.keys(friendRoom.players);
+    
+    if (playerIds.length < 2) {
       return res.status(400).json({ error: 'Need at least 2 players to start' });
     }
 
-    const playerIds = Object.keys(friendRoom.players);
-    const randomIndex = Math.floor(Math.random() * playerIds.length);
-    const firstTurn = playerIds[randomIndex];
+    // Give first turn to a random player
+    const firstTurn = playerIds[Math.floor(Math.random() * playerIds.length)];
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('friend_rooms')
-      .update({ game_state: 'playing', turn: firstTurn })
+      .update({ 
+        game_state: 'playing', 
+        turn: firstTurn 
+      })
       .eq('room_id', roomCode)
       .select()
       .single();
 
     if (updateError) throw updateError;
 
+    console.log(`✅ Friend game started: ${roomCode} with ${playerIds.length} players`);
     res.json({ friendRoom: updatedRoom });
   } catch (error) {
     console.error('Error starting friend game:', error);

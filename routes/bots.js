@@ -7,10 +7,49 @@ import {
   hasValidMoves,
   checkAllTokensHome,
   getNextTurn,
-  generateBotId
+  generateBotId,
+  assignColor
 } from '../utils/gameHelpers.js';
 
 const router = express.Router();
+
+// Helper function to find room in game_rooms, friend_rooms, or tournament_rooms
+async function findGameRoom(roomId) {
+  // First try game_rooms
+  let { data: gameRoom, error } = await supabaseAdmin
+    .from('game_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (gameRoom) {
+    return { gameRoom, tableName: 'game_rooms' };
+  }
+
+  // If not found, try friend_rooms
+  const { data: friendRoom, error: friendError } = await supabaseAdmin
+    .from('friend_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (friendRoom) {
+    return { gameRoom: friendRoom, tableName: 'friend_rooms' };
+  }
+
+  // If not found, try tournament_rooms
+  const { data: tournamentRoom, error: tournamentError } = await supabaseAdmin
+    .from('tournament_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (tournamentRoom) {
+    return { gameRoom: tournamentRoom, tableName: 'tournament_rooms' };
+  }
+
+  return { gameRoom: null, tableName: null };
+}
 
 // Bot Roll Dice (No auth required - bot sends its own ID)
 router.post('/:roomId/bot-roll-dice', async (req, res) => {
@@ -22,13 +61,9 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
       return res.status(400).json({ error: 'botUserId is required' });
     }
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
+    if (!gameRoom) {
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -61,7 +96,7 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
       const nextTurn = getNextTurn(Object.keys(gameRoom.players), botUserId);
       
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from('game_rooms')
+        .from(tableName)
         .update({
           consecutive_sixes: updatedConsecutiveSixes,
           turn: nextTurn,
@@ -80,7 +115,7 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
     const updatedConsecutiveSixes = { ...consecutiveSixes, [botUserId]: currentCount };
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({
         dice_result: diceResult,
         dice_state: 'rolling',
@@ -109,13 +144,9 @@ router.post('/:roomId/bot-complete-dice', async (req, res) => {
       return res.status(400).json({ error: 'botUserId is required' });
     }
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
+    if (!gameRoom) {
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -136,7 +167,7 @@ router.post('/:roomId/bot-complete-dice', async (req, res) => {
       if (diceResult !== 6) consecutiveSixes[botUserId] = 0;
 
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from('game_rooms')
+        .from(tableName)
         .update({
           dice_state: 'waiting',
           dice_result: null,
@@ -156,7 +187,7 @@ router.post('/:roomId/bot-complete-dice', async (req, res) => {
     pendingSteps[botUserId] = diceResult;
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({ dice_state: 'complete', pending_steps: pendingSteps })
       .eq('room_id', roomId)
       .select()
@@ -181,13 +212,9 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
       return res.status(400).json({ error: 'botUserId is required' });
     }
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
+    if (!gameRoom) {
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -248,10 +275,16 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
       nextTurn = getNextTurn(Object.keys(gameRoom.players), botUserId);
     }
 
+    // Reset consecutive sixes when turn passes to another player
+    const consecutiveSixes = gameRoom.consecutive_sixes || {};
+    if (nextTurn !== botUserId) {
+      consecutiveSixes[botUserId] = 0;
+    }
+
     const gameFinished = updatedWinners.length >= Object.keys(gameRoom.players).length - 1;
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({
         positions: updatedPositions,
         pending_steps: updatedPendingSteps,
@@ -260,6 +293,7 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
         dice_state: 'waiting',
         winners: updatedWinners,
         game_state: gameFinished ? 'finished' : 'playing',
+        consecutive_sixes: consecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()
@@ -304,9 +338,16 @@ router.post('/:roomId/add-bots', authenticateUser, async (req, res) => {
     }
 
     const botsToAdd = Math.min(numberOfBots, emptySlots);
-    const availableColors = ['red', 'blue', 'green', 'yellow', 'orange', 'purple'];
-    const usedColors = Object.values(currentPlayers);
-    const freeColors = availableColors.filter(color => !usedColors.includes(color));
+    // Get free colors using the anti-clockwise turn order from assignColor
+    const freeColors = [];
+    let tempPlayers = { ...currentPlayers };
+    for (let i = 0; i < botsToAdd; i++) {
+      const nextColor = assignColor(tempPlayers, maxPlayers);
+      if (nextColor) {
+        freeColors.push(nextColor);
+        tempPlayers[`temp_${i}`] = nextColor; // Temporarily mark as used
+      }
+    }
 
     const botNames = [
       'Alex', 'Jordan', 'Taylor', 'Morgan', 'Casey', 'Riley',

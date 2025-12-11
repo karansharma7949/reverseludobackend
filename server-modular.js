@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import usersRouter from './routes/users.js';
 import botsRouter from './routes/bots.js';
 import friendRoomsRouter from './routes/friendRooms.js';
+import tournamentsRouter from './routes/tournaments.js';
+import teamupRouter from './routes/teamup.js';
 
 // Import config
 import { supabaseAdmin } from './config/supabase.js';
@@ -47,8 +49,14 @@ app.use('/api/users', usersRouter);
 // Bot routes
 app.use('/api/game-rooms', botsRouter);
 
+// Team up routes
+app.use('/api/team-up-rooms', teamupRouter);
+
 // Friend room routes
 app.use('/api/friend-rooms', friendRoomsRouter);
+
+// Tournament routes
+app.use('/api/tournaments', tournamentsRouter);
 
 // ============================================
 // GAME ROOM ENDPOINTS
@@ -85,16 +93,26 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
     }
 
     if (roomToJoin) {
+      console.log('🔵 JOINING EXISTING ROOM:', roomToJoin.room_id);
+      console.log('   Current players:', roomToJoin.players);
+      console.log('   Room capacity:', roomToJoin.no_of_players);
+      
       const assignedColor = assignColor(roomToJoin.players, roomToJoin.no_of_players);
+      
       if (!assignedColor) {
+        console.log('   ❌ No available colors');
         return res.status(400).json({ error: 'No available colors' });
       }
+
+      console.log('   ✅ Player', userId, 'assigned color:', assignedColor);
 
       const updatedPlayers = { ...roomToJoin.players, [userId]: assignedColor };
       const updatedPositions = {
         ...roomToJoin.positions,
         [assignedColor]: { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 }
       };
+      
+      console.log('   Updated players:', updatedPlayers);
       
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
         .from('game_rooms')
@@ -105,6 +123,7 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
 
       if (updateError) throw updateError;
 
+      console.log('   ✅ Room updated successfully');
       return res.json({ success: true, gameRoom: updatedRoom, action: 'joined' });
     }
 
@@ -129,9 +148,16 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
       return res.status(500).json({ error: 'Failed to generate unique room ID' });
     }
 
+    console.log('🟢 CREATING NEW ROOM:', roomId);
+    console.log('   Host:', userId);
+    console.log('   Capacity:', noOfPlayers);
+    
     const hostColor = 'red';
     const players = { [userId]: hostColor };
     const positions = initializePositions(players);
+
+    console.log('   Host color:', hostColor);
+    console.log('   Initial players:', players);
 
     const { data: gameRoom, error } = await supabaseAdmin
       .from('game_rooms')
@@ -152,6 +178,7 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
 
     if (error) throw error;
 
+    console.log('   ✅ Room created successfully');
     res.json({ success: true, gameRoom, action: 'created' });
   } catch (error) {
     console.error('Error in quick match:', error);
@@ -219,12 +246,119 @@ app.post('/api/game-rooms/create', authenticateUser, async (req, res) => {
   }
 });
 
+// Fill room with bots
+app.post('/api/game-rooms/:roomId/fill-with-bots', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { numberOfBots } = req.body;
+
+    console.log('🤖 FILLING ROOM WITH BOTS:', roomId);
+    console.log('   Number of bots requested:', numberOfBots);
+
+    const { data: gameRoom, error: fetchError } = await supabaseAdmin
+      .from('game_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !gameRoom) {
+      return res.status(404).json({ error: 'Game room not found' });
+    }
+
+    const currentPlayers = gameRoom.players || {};
+    const emptySlots = gameRoom.no_of_players - Object.keys(currentPlayers).length;
+    const botsToAdd = Math.min(numberOfBots, emptySlots);
+
+    console.log('   Current players:', currentPlayers);
+    console.log('   Empty slots:', emptySlots);
+    console.log('   Bots to add:', botsToAdd);
+
+    if (botsToAdd <= 0) {
+      return res.json({ success: true, gameRoom });
+    }
+
+    // Realistic bot names to mimic real players
+    const botNames = [
+      'Alex', 'Jordan', 'Taylor', 'Morgan', 'Casey', 'Riley',
+      'Sam', 'Jamie', 'Chris', 'Pat', 'Drew', 'Quinn',
+      'Avery', 'Blake', 'Cameron', 'Dakota', 'Emerson', 'Finley',
+      'Harper', 'Hayden', 'Jesse', 'Kai', 'Logan', 'Micah',
+      'Noah', 'Parker', 'Reese', 'Rowan', 'Sage', 'Skylar'
+    ];
+
+    const updatedPlayers = { ...currentPlayers };
+    const updatedPositions = { ...gameRoom.positions };
+    const botUserEntries = [];
+
+    for (let i = 0; i < botsToAdd; i++) {
+      // Generate proper UUID v4 for bot
+      const botId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+      
+      const botColor = assignColor(updatedPlayers, gameRoom.no_of_players);
+      
+      if (!botColor) {
+        console.log('   ❌ No more colors available');
+        break;
+      }
+
+      const botName = botNames[Math.floor(Math.random() * botNames.length)] + Math.floor(Math.random() * 999);
+
+      console.log(`   🤖 Adding bot ${i + 1}: ${botId} (${botName}) with color ${botColor}`);
+      updatedPlayers[botId] = botColor;
+      updatedPositions[botColor] = { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 };
+
+      // Create fake user entry so bot appears as real player
+      botUserEntries.push({
+        uid: botId,
+        username: botName,
+        total_coins: 0,
+        total_diamonds: 0,
+        profile_image_url: null
+      });
+    }
+
+    // Insert bot user entries (upsert to avoid conflicts)
+    if (botUserEntries.length > 0) {
+      const { error: insertError } = await supabaseAdmin
+        .from('users')
+        .upsert(botUserEntries, { onConflict: 'uid' });
+
+      if (insertError) {
+        console.error('   ⚠️ Error creating bot users:', insertError);
+        // Continue anyway, bots will just show as "Player X"
+      } else {
+        console.log('   ✅ Bot users created in database');
+      }
+    }
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from('game_rooms')
+      .update({ players: updatedPlayers, positions: updatedPositions })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    console.log('   ✅ Bots added successfully');
+    console.log('   Final players:', updatedPlayers);
+    res.json({ success: true, gameRoom: updatedRoom });
+  } catch (error) {
+    console.error('Error filling room with bots:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get game room
 app.get('/api/game-rooms/:roomId', authenticateUser, async (req, res) => {
   try {
     const { roomId } = req.params;
 
-    const { data: gameRoom, error } = await supabaseAdmin
+    const { data: gameRoom, error} = await supabaseAdmin
       .from('game_rooms')
       .select('*')
       .eq('room_id', roomId)
@@ -320,12 +454,15 @@ app.post('/api/game-rooms/:roomId/start', authenticateUser, async (req, res) => 
       return res.status(400).json({ error: 'Need at least 2 players to start' });
     }
 
-    const randomIndex = Math.floor(Math.random() * playerIds.length);
-    const randomPlayerId = playerIds[randomIndex];
+    // Always give first turn to a real player (not bot)
+    const realPlayers = playerIds.filter(id => !id.startsWith('bot_'));
+    const firstTurnPlayer = realPlayers.length > 0 
+      ? realPlayers[Math.floor(Math.random() * realPlayers.length)]
+      : playerIds[0]; // Fallback to any player if all are bots
     
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('game_rooms')
-      .update({ game_state: 'playing', turn: randomPlayerId })
+      .update({ game_state: 'playing', turn: firstTurnPlayer })
       .eq('room_id', roomId)
       .select()
       .single();
@@ -344,13 +481,9 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
     const { roomId } = req.params;
     const userId = req.user.id;
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
+    if (!gameRoom) {
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -383,7 +516,7 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
       const nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
       
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from('game_rooms')
+        .from(tableName)
         .update({
           consecutive_sixes: updatedConsecutiveSixes,
           turn: nextTurn,
@@ -402,7 +535,7 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
     const updatedConsecutiveSixes = { ...consecutiveSixes, [userId]: currentCount };
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({
         dice_result: diceResult,
         dice_state: 'rolling',
@@ -426,13 +559,9 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
     const { roomId } = req.params;
     const userId = req.user.id;
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
+    if (!gameRoom) {
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -457,7 +586,7 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
       if (diceResult !== 6) consecutiveSixes[userId] = 0;
 
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from('game_rooms')
+        .from(tableName)
         .update({
           dice_state: 'waiting',
           dice_result: null,
@@ -477,7 +606,7 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
     pendingSteps[userId] = diceResult;
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({ dice_state: 'complete', pending_steps: pendingSteps })
       .eq('room_id', roomId)
       .select()
@@ -498,13 +627,9 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
     const userId = req.user.id;
     const { tokenName, color } = req.body;
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
+    if (!gameRoom) {
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -565,10 +690,16 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
       nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
     }
 
+    // Reset consecutive sixes when turn passes to another player
+    const consecutiveSixes = gameRoom.consecutive_sixes || {};
+    if (nextTurn !== userId) {
+      consecutiveSixes[userId] = 0;
+    }
+
     const gameFinished = updatedWinners.length >= Object.keys(gameRoom.players).length - 1;
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({
         positions: updatedPositions,
         pending_steps: updatedPendingSteps,
@@ -577,6 +708,7 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
         dice_state: 'waiting',
         winners: updatedWinners,
         game_state: gameFinished ? 'finished' : 'playing',
+        consecutive_sixes: consecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()
@@ -634,6 +766,44 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
     res.status(500).json({ error: error.message });
   }
 });
+
+// Helper function to find room in game_rooms, tournament_rooms, or friend_rooms
+async function findGameRoom(roomId) {
+  // First try game_rooms
+  let { data: gameRoom, error } = await supabaseAdmin
+    .from('game_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (gameRoom) {
+    return { gameRoom, tableName: 'game_rooms' };
+  }
+
+  // If not found, try tournament_rooms
+  const { data: tournamentRoom, error: tournamentError } = await supabaseAdmin
+    .from('tournament_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (tournamentRoom) {
+    return { gameRoom: tournamentRoom, tableName: 'tournament_rooms' };
+  }
+
+  // If not found, try friend_rooms
+  const { data: friendRoom, error: friendError } = await supabaseAdmin
+    .from('friend_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (friendRoom) {
+    return { gameRoom: friendRoom, tableName: 'friend_rooms' };
+  }
+
+  return { gameRoom: null, tableName: null };
+}
 
 // Health check
 app.get('/health', (req, res) => {

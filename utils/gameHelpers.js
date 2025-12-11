@@ -11,16 +11,56 @@ export function generateRoomId() {
 }
 
 // Assign color to player based on number of existing players
+// ANTI-CLOCKWISE turn order:
+// 4 players: red > blue > yellow > green > red
+// 5 players: red > green > orange > blue > yellow > red
+// 6 players: red > orange > green > yellow > purple > blue > red
 export function assignColor(players, noOfPlayers) {
-  const colors = ['red', 'blue', 'green', 'yellow', 'orange', 'purple'];
-  const availableColors = colors.slice(0, noOfPlayers);
+  console.log('🎨 ========================================');
+  console.log('🎨 COLOR ASSIGNMENT DEBUG');
+  console.log('🎨 ========================================');
+  console.log('   noOfPlayers:', noOfPlayers);
+  console.log('   existing players:', players);
+  console.log('   player count:', Object.keys(players).length);
+  
+  let availableColors;
+  
+  if (noOfPlayers === 2) {
+    // 2-player: diagonal positions (red vs yellow)
+    availableColors = ['red', 'yellow'];
+    console.log('   ✅ 2-PLAYER MODE: Using diagonal colors [red, yellow]');
+  } else if (noOfPlayers === 3) {
+    // 3-player: anti-clockwise spacing
+    availableColors = ['red', 'yellow', 'green'];
+    console.log('   ✅ 3-PLAYER MODE: Using anti-clockwise colors [red, yellow, green]');
+  } else if (noOfPlayers === 4) {
+    // 4-player: anti-clockwise: red > blue > yellow > green
+    availableColors = ['red', 'blue', 'yellow', 'green'];
+    console.log('   ✅ 4-PLAYER MODE: Using anti-clockwise colors [red, blue, yellow, green]');
+  } else if (noOfPlayers === 5) {
+    // 5-player: anti-clockwise: red > green > orange > blue > yellow
+    availableColors = ['red', 'green', 'orange', 'blue', 'yellow'];
+    console.log('   ✅ 5-PLAYER MODE: Using anti-clockwise colors [red, green, orange, blue, yellow]');
+  } else {
+    // 6-player: anti-clockwise: red > orange > green > yellow > purple > blue
+    availableColors = ['red', 'orange', 'green', 'yellow', 'purple', 'blue'];
+    console.log('   ✅ 6-PLAYER MODE: Using anti-clockwise colors [red, orange, green, yellow, purple, blue]');
+  }
+  
   const usedColors = Object.values(players);
+  console.log('   usedColors:', usedColors);
+  console.log('   availableColors:', availableColors);
   
   for (const color of availableColors) {
     if (!usedColors.includes(color)) {
+      console.log('   ✅ ASSIGNED COLOR:', color);
+      console.log('🎨 ========================================');
       return color;
     }
   }
+  
+  console.log('   ❌ NO AVAILABLE COLORS - ROOM FULL');
+  console.log('🎨 ========================================');
   return null;
 }
 
@@ -139,14 +179,20 @@ export function checkForKills(gameRoom, color, newPosition, updatedPositions) {
 
 // Check if player has valid moves
 export function hasValidMoves(playerPositions, diceResult, noOfPlayers) {
-  const { finalPosition, homePosition } = getBoardConfig(noOfPlayers);
+  const { homePosition } = getBoardConfig(noOfPlayers);
   
   for (const tokenName in playerPositions) {
     const currentPos = playerPositions[tokenName];
     
     if (currentPos === 0) {
+      // Token at home - can only exit with a 6
       if (diceResult === 6) return true;
-    } else if (currentPos < finalPosition) {
+    } else if (currentPos >= homePosition) {
+      // Token already at final position (home center) - cannot move
+      continue;
+    } else {
+      // Token on board or in home column (1 to homePosition-1)
+      // Can move if new position doesn't exceed homePosition
       if (currentPos + diceResult <= homePosition) return true;
     }
   }
