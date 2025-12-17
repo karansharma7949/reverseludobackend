@@ -349,48 +349,33 @@ router.post('/:roomId/add-bots', authenticateUser, async (req, res) => {
       }
     }
 
-    const botNames = [
-      'Alex', 'Jordan', 'Taylor', 'Morgan', 'Casey', 'Riley',
-      'Sam', 'Jamie', 'Chris', 'Pat', 'Drew', 'Quinn'
-    ];
-
-    // Bot avatar URLs (using UI Avatars API for consistent bot avatars)
-    const botAvatars = [
-      'https://ui-avatars.com/api/?name=Bot&background=FF6B6B&color=fff&size=128',
-      'https://ui-avatars.com/api/?name=Bot&background=4ECDC4&color=fff&size=128',
-      'https://ui-avatars.com/api/?name=Bot&background=45B7D1&color=fff&size=128',
-      'https://ui-avatars.com/api/?name=Bot&background=96CEB4&color=fff&size=128',
-      'https://ui-avatars.com/api/?name=Bot&background=FFEAA7&color=333&size=128',
-      'https://ui-avatars.com/api/?name=Bot&background=DDA0DD&color=fff&size=128',
+    // Use fixed bot IDs instead of generating random ones
+    const fixedBotIds = [
+      '00000000-0000-0000-0000-000000000001', // Arjun
+      '00000000-0000-0000-0000-000000000002', // Priya
+      '00000000-0000-0000-0000-000000000003', // Rahul
+      '00000000-0000-0000-0000-000000000004', // Ananya
+      '00000000-0000-0000-0000-000000000005', // Vikram
+      '00000000-0000-0000-0000-000000000006', // Kavya
+      '00000000-0000-0000-0000-000000000007', // Rohan
+      '00000000-0000-0000-0000-000000000008', // Shreya
+      '00000000-0000-0000-0000-000000000009', // Aditya
+      '00000000-0000-0000-0000-000000000010', // Meera
     ];
 
     const updatedPlayers = { ...currentPlayers };
-    const botUserEntries = [];
 
     for (let i = 0; i < botsToAdd; i++) {
       if (freeColors.length === 0) break;
       
-      const botId = generateBotId();
+      // Use fixed bot ID instead of generating random UUID
+      const botId = fixedBotIds[i % fixedBotIds.length];
       const botColor = freeColors.shift();
-      const botName = botNames[Math.floor(Math.random() * botNames.length)] + Math.floor(Math.random() * 999);
-      const botAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(botName)}&background=random&color=fff&size=128&bold=true`;
       
       updatedPlayers[botId] = botColor;
-      
-      botUserEntries.push({
-        uid: botId,
-        username: botName,
-        total_coins: 0,
-        total_diamonds: 0,
-        profile_image_url: botAvatar
-      });
     }
 
-    if (botUserEntries.length > 0) {
-      await supabaseAdmin
-        .from('users')
-        .upsert(botUserEntries, { onConflict: 'uid' });
-    }
+    // No need to create bot user entries - they already exist as fixed bots
 
     const currentPositions = room.positions || {};
     const updatedPositions = { ...currentPositions };

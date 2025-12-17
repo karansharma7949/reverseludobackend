@@ -137,9 +137,21 @@ router.post('/start', async (req, res) => {
     // Fill with bots if needed
     let updatedParticipants = { ...participants };
     if (playerCount < 8) {
+      // Use fixed bot IDs instead of generating random ones
+      const fixedBotIds = [
+        '00000000-0000-0000-0000-000000000001', // Arjun
+        '00000000-0000-0000-0000-000000000002', // Priya
+        '00000000-0000-0000-0000-000000000003', // Rahul
+        '00000000-0000-0000-0000-000000000004', // Ananya
+        '00000000-0000-0000-0000-000000000005', // Vikram
+        '00000000-0000-0000-0000-000000000006', // Kavya
+        '00000000-0000-0000-0000-000000000007', // Rohan
+        '00000000-0000-0000-0000-000000000008', // Shreya
+      ];
+
       const botsNeeded = 8 - playerCount;
       for (let i = 0; i < botsNeeded; i++) {
-        const botId = `bot_${Date.now()}_${i}`;
+        const botId = fixedBotIds[i % fixedBotIds.length];
         updatedParticipants[botId] = {
           joined_at: new Date().toISOString(),
           entry_fee_paid: 0,

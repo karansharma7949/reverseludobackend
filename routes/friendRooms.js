@@ -228,11 +228,18 @@ router.post('/:roomCode/start', authenticateUser, async (req, res) => {
     // Give first turn to a random player
     const firstTurn = playerIds[Math.floor(Math.random() * playerIds.length)];
 
+    // Initialize mic_state for all players (default: mic off, not speaking)
+    const micState = {};
+    playerIds.forEach(playerId => {
+      micState[playerId] = { mic: 'off', speaking: false };
+    });
+
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('friend_rooms')
       .update({ 
         game_state: 'playing', 
-        turn: firstTurn 
+        turn: firstTurn,
+        mic_state: micState
       })
       .eq('room_id', roomCode)
       .select()
@@ -244,6 +251,55 @@ router.post('/:roomCode/start', authenticateUser, async (req, res) => {
     res.json({ friendRoom: updatedRoom });
   } catch (error) {
     console.error('Error starting friend game:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update mic state (toggle mic on/off, update speaking status)
+router.post('/:roomCode/mic-state', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { roomCode } = req.params;
+    const { micState, speaking } = req.body; // micState: 'on' | 'off', speaking: boolean
+
+    const { data: friendRoom, error: fetchError } = await supabaseAdmin
+      .from('friend_rooms')
+      .select('*')
+      .eq('room_id', roomCode)
+      .single();
+
+    if (fetchError || !friendRoom) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    // Check if user is in the room
+    if (!friendRoom.players[userId]) {
+      return res.status(403).json({ error: 'User not in room' });
+    }
+
+    // Update mic state for this user
+    const currentMicState = friendRoom.mic_state || {};
+    const updatedMicState = {
+      ...currentMicState,
+      [userId]: {
+        mic: micState !== undefined ? micState : (currentMicState[userId]?.mic || 'off'),
+        speaking: speaking !== undefined ? speaking : (currentMicState[userId]?.speaking || false)
+      }
+    };
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from('friend_rooms')
+      .update({ mic_state: updatedMicState })
+      .eq('room_id', roomCode)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    console.log(`🎤 Mic state updated for ${userId} in room ${roomCode}:`, updatedMicState[userId]);
+    res.json({ success: true, friendRoom: updatedRoom });
+  } catch (error) {
+    console.error('Error updating mic state:', error);
     res.status(500).json({ error: error.message });
   }
 });

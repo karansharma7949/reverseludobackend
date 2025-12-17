@@ -272,7 +272,7 @@ export const starPositions = {
 
 // Final and home positions for each board type
 export const boardConfig = {
-  4: { finalPosition: 57, homePosition: 61 },
-  5: { finalPosition: 69, homePosition: 73 },
-  6: { finalPosition: 83, homePosition: 86 }
+  4: { finalPosition: 61, homePosition: 61 },
+  5: { finalPosition: 73, homePosition: 73 },
+  6: { finalPosition: 86, homePosition: 86 }
 };
