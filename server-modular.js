@@ -163,7 +163,9 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
     console.log(`   Capacity: ${noOfPlayers}`);
     console.log(`   Board theme: ${boardTheme || 'classic'}`);
     
-    const hostColor = 'red';
+    // Use assignColor to get the correct first color based on player count
+    // For 2-player: blue (diagonal), for others: red
+    const hostColor = assignColor({}, noOfPlayers);
     const players = { [userId]: hostColor };
     const positions = initializePositions(players);
 
@@ -640,10 +642,14 @@ app.post('/api/game-rooms/:roomId/fix-turn', authenticateUser, async (req, res) 
 });
 
 // Roll dice
+// CLIENT-FIRST: Accepts optional diceResult from client for instant gameplay
+// If client provides diceResult, we validate and use it
+// If not provided, we generate server-side (backward compatible)
 app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res) => {
   try {
     const { roomId } = req.params;
     const userId = req.user.id;
+    const { diceResult: clientDiceResult } = req.body; // CLIENT-FIRST: Accept client dice result
 
     const { gameRoom, tableName } = await findGameRoom(roomId);
 
@@ -664,39 +670,17 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
       return res.status(400).json({ error: 'You must move a token first' });
     }
 
-    const diceResult = Math.floor(Math.random() * 6) + 1;
-
-    const consecutiveSixes = gameRoom.consecutive_sixes || {};
-    let currentCount = consecutiveSixes[userId] || 0;
-    
-    if (diceResult === 6) {
-      currentCount += 1;
+    // CLIENT-FIRST: Use client dice result if provided and valid, otherwise generate server-side
+    let diceResult;
+    if (clientDiceResult !== undefined && clientDiceResult >= 1 && clientDiceResult <= 6) {
+      diceResult = clientDiceResult;
+      console.log(`🎲 [ClientFirst] Using client-provided dice result: ${diceResult}`);
     } else {
-      currentCount = 0;
+      diceResult = Math.floor(Math.random() * 6) + 1;
+      console.log(`🎲 [ServerFirst] Generated server dice result: ${diceResult}`);
     }
 
-    if (currentCount >= 3) {
-      const updatedConsecutiveSixes = { ...consecutiveSixes, [userId]: 0 };
-      const nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
-      
-      const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from(tableName)
-        .update({
-          consecutive_sixes: updatedConsecutiveSixes,
-          turn: nextTurn,
-          dice_result: null,
-          dice_state: 'waiting',
-        })
-        .eq('room_id', roomId)
-        .select()
-        .single();
-
-      if (updateError) throw updateError;
-
-      return res.json({ success: true, turnCancelled: true, gameRoom: updatedRoom });
-    }
-
-    const updatedConsecutiveSixes = { ...consecutiveSixes, [userId]: currentCount };
+    // Removed 3 consecutive sixes constraint - players can keep rolling
 
     // First update with rolling state for frontend animation
     const { data: rollingRoom, error: rollingError } = await supabaseAdmin
@@ -704,7 +688,6 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
       .update({
         dice_result: diceResult,
         dice_state: 'rolling',
-        consecutive_sixes: updatedConsecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()
@@ -713,16 +696,29 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
     if (rollingError) throw rollingError;
 
     // After a short delay, automatically set to complete state
+    // BUT only if the dice is still in 'rolling' state (prevents race condition with move-token)
     setTimeout(async () => {
       try {
-        await supabaseAdmin
+        // First check current state - only update if still rolling
+        const { data: currentRoom } = await supabaseAdmin
           .from(tableName)
-          .update({
-            dice_state: 'complete',
-          })
-          .eq('room_id', roomId);
+          .select('dice_state, turn')
+          .eq('room_id', roomId)
+          .single();
         
-        console.log(`🎲 Auto-completed dice for room ${roomId} with result ${diceResult}`);
+        // Only auto-complete if dice is still rolling AND it's still the same player's turn
+        if (currentRoom && currentRoom.dice_state === 'rolling' && currentRoom.turn === userId) {
+          await supabaseAdmin
+            .from(tableName)
+            .update({
+              dice_state: 'complete',
+            })
+            .eq('room_id', roomId);
+          
+          console.log(`🎲 Auto-completed dice for room ${roomId} with result ${diceResult}`);
+        } else {
+          console.log(`🎲 Skipped auto-complete for room ${roomId} - state already changed (dice_state: ${currentRoom?.dice_state}, turn: ${currentRoom?.turn})`);
+        }
       } catch (error) {
         console.error(`Error auto-completing dice for room ${roomId}:`, error);
       }
@@ -768,8 +764,6 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
 
     if (!validMove) {
       const nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
-      const consecutiveSixes = gameRoom.consecutive_sixes || {};
-      if (diceResult !== 6) consecutiveSixes[userId] = 0;
 
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
         .from(tableName)
@@ -777,7 +771,6 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
           dice_state: 'waiting',
           dice_result: null,
           turn: nextTurn,
-          consecutive_sixes: consecutiveSixes,
         })
         .eq('room_id', roomId)
         .select()
@@ -871,16 +864,19 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
     const updatedPendingSteps = { ...pendingSteps };
     delete updatedPendingSteps[userId];
 
+    // Check if token reached finish position (bonus turn)
+    const tokenReachedFinish = newPosition === homePosition;
+    if (tokenReachedFinish) {
+      console.log(`🏠 Token reached finish! Player gets bonus turn.`);
+    }
+
     let nextTurn = userId;
-    if (stepsToMove !== 6 && !bonusRoll) {
+    // Player keeps turn if: rolled 6, killed opponent, OR token reached finish
+    if (stepsToMove !== 6 && !bonusRoll && !tokenReachedFinish) {
       nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
     }
 
-    // Reset consecutive sixes when turn passes to another player
-    const consecutiveSixes = gameRoom.consecutive_sixes || {};
-    if (nextTurn !== userId) {
-      consecutiveSixes[userId] = 0;
-    }
+    // Turn management - no consecutive sixes constraint
 
     const gameFinished = updatedWinners.length >= Object.keys(gameRoom.players).length - 1;
 
@@ -894,7 +890,6 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
         dice_state: 'waiting',
         winners: updatedWinners,
         game_state: gameFinished ? 'finished' : 'playing',
-        consecutive_sixes: consecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()
@@ -1013,9 +1008,7 @@ app.post('/api/game-rooms/:roomId/pass-turn', authenticateUser, async (req, res)
     const updatedPendingSteps = { ...gameRoom.pending_steps };
     delete updatedPendingSteps[userId];
 
-    // Reset consecutive sixes for this player
-    const consecutiveSixes = { ...gameRoom.consecutive_sixes };
-    consecutiveSixes[userId] = 0;
+    // Pass turn logic
 
     // Get next player
     const playerIds = Object.keys(gameRoom.players);
@@ -1031,7 +1024,6 @@ app.post('/api/game-rooms/:roomId/pass-turn', authenticateUser, async (req, res)
         dice_state: 'waiting',
         dice_result: null,
         pending_steps: updatedPendingSteps,
-        consecutive_sixes: consecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()

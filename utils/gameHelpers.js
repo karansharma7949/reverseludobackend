@@ -26,9 +26,9 @@ export function assignColor(players, noOfPlayers) {
   let availableColors;
   
   if (noOfPlayers === 2) {
-    // 2-player: diagonal positions (red vs yellow)
-    availableColors = ['red', 'yellow'];
-    console.log('   ✅ 2-PLAYER MODE: Using diagonal colors [red, yellow]');
+    // 2-player: diagonal positions (blue vs green)
+    availableColors = ['blue', 'green'];
+    console.log('   ✅ 2-PLAYER MODE: Using diagonal colors [blue, green]');
   } else if (noOfPlayers === 3) {
     // 3-player: anti-clockwise spacing
     availableColors = ['red', 'yellow', 'green'];

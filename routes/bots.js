@@ -82,44 +82,13 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
 
     const diceResult = Math.floor(Math.random() * 6) + 1;
 
-    const consecutiveSixes = gameRoom.consecutive_sixes || {};
-    let currentCount = consecutiveSixes[botUserId] || 0;
-    
-    if (diceResult === 6) {
-      currentCount += 1;
-    } else {
-      currentCount = 0;
-    }
-
-    if (currentCount >= 3) {
-      const updatedConsecutiveSixes = { ...consecutiveSixes, [botUserId]: 0 };
-      const nextTurn = getNextTurn(Object.keys(gameRoom.players), botUserId);
-      
-      const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from(tableName)
-        .update({
-          consecutive_sixes: updatedConsecutiveSixes,
-          turn: nextTurn,
-          dice_result: null,
-          dice_state: 'waiting',
-        })
-        .eq('room_id', roomId)
-        .select()
-        .single();
-
-      if (updateError) throw updateError;
-
-      return res.json({ success: true, turnCancelled: true, gameRoom: updatedRoom });
-    }
-
-    const updatedConsecutiveSixes = { ...consecutiveSixes, [botUserId]: currentCount };
+    // Removed 3 consecutive sixes constraint for bots
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from(tableName)
       .update({
         dice_result: diceResult,
         dice_state: 'rolling',
-        consecutive_sixes: updatedConsecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()
@@ -163,8 +132,6 @@ router.post('/:roomId/bot-complete-dice', async (req, res) => {
 
     if (!validMove) {
       const nextTurn = getNextTurn(Object.keys(gameRoom.players), botUserId);
-      const consecutiveSixes = gameRoom.consecutive_sixes || {};
-      if (diceResult !== 6) consecutiveSixes[botUserId] = 0;
 
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
         .from(tableName)
@@ -172,7 +139,6 @@ router.post('/:roomId/bot-complete-dice', async (req, res) => {
           dice_state: 'waiting',
           dice_result: null,
           turn: nextTurn,
-          consecutive_sixes: consecutiveSixes,
         })
         .eq('room_id', roomId)
         .select()
@@ -270,16 +236,19 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
     const updatedPendingSteps = { ...pendingSteps };
     delete updatedPendingSteps[botUserId];
 
+    // Check if token reached finish position (bonus turn)
+    const tokenReachedFinish = newPosition === homePosition;
+    if (tokenReachedFinish) {
+      console.log(`🏠 [BOT] Token reached finish! Bot gets bonus turn.`);
+    }
+
     let nextTurn = botUserId;
-    if (stepsToMove !== 6 && !bonusRoll) {
+    // Bot keeps turn if: rolled 6, killed opponent, OR token reached finish
+    if (stepsToMove !== 6 && !bonusRoll && !tokenReachedFinish) {
       nextTurn = getNextTurn(Object.keys(gameRoom.players), botUserId);
     }
 
-    // Reset consecutive sixes when turn passes to another player
-    const consecutiveSixes = gameRoom.consecutive_sixes || {};
-    if (nextTurn !== botUserId) {
-      consecutiveSixes[botUserId] = 0;
-    }
+    // Turn management - no consecutive sixes constraint
 
     const gameFinished = updatedWinners.length >= Object.keys(gameRoom.players).length - 1;
 
@@ -293,7 +262,6 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
         dice_state: 'waiting',
         winners: updatedWinners,
         game_state: gameFinished ? 'finished' : 'playing',
-        consecutive_sixes: consecutiveSixes,
       })
       .eq('room_id', roomId)
       .select()

@@ -87,41 +87,7 @@ router.post('/:roomId/roll-dice', authenticateUser, async (req, res) => {
     const diceResult = Math.floor(Math.random() * 6) + 1;
     console.log(`🎲 [TEAM UP BACKEND] Dice result: ${diceResult}`);
 
-    // Track consecutive 6s
-    const consecutiveSixes = room.consecutive_sixes || {};
-    let currentCount = consecutiveSixes[userId] || 0;
-    
-    if (diceResult === 6) {
-      currentCount += 1;
-    } else {
-      currentCount = 0;
-    }
-
-    // If 3 consecutive 6s, cancel turn
-    if (currentCount >= 3) {
-      console.log(`⚠️ [TEAM UP BACKEND] 3 consecutive 6s! Cancelling turn`);
-      const updatedConsecutiveSixes = { ...consecutiveSixes, [userId]: 0 };
-      const nextTurn = getNextTeamTurn(room.players, userId);
-      
-      const { data: updatedRoom, error: updateError } = await supabaseAdmin
-        .from('team_up_rooms')
-        .update({
-          consecutive_sixes: updatedConsecutiveSixes,
-          turn: nextTurn,
-          dice_result: null,
-          dice_state: 'waiting',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('room_id', roomId)
-        .select()
-        .single();
-
-      if (updateError) throw updateError;
-
-      return res.json({ success: true, turnCancelled: true, room: updatedRoom });
-    }
-
-    const updatedConsecutiveSixes = { ...consecutiveSixes, [userId]: currentCount };
+    // Removed 3 consecutive sixes constraint
 
     // Update room with dice result (NO pending_steps yet!)
     const { data: updatedRoom, error: updateError} = await supabaseAdmin
@@ -129,7 +95,6 @@ router.post('/:roomId/roll-dice', authenticateUser, async (req, res) => {
       .update({
         dice_result: diceResult,
         dice_state: 'rolling',
-        consecutive_sixes: updatedConsecutiveSixes,
         updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)
@@ -371,9 +336,16 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     const updatedPendingSteps = { ...pendingSteps };
     delete updatedPendingSteps[userId];
 
+    // Check if token reached finish position (bonus turn)
+    const tokenReachedFinish = newPos === 61;
+    if (tokenReachedFinish) {
+      console.log(`🏠 [TEAM UP] Token reached finish! Player gets bonus turn.`);
+    }
+
     // Determine next turn
     let nextTurn = userId;
-    const shouldGetAnotherTurn = stepsToMove === 6 || bonusRoll;
+    // Player keeps turn if: rolled 6, killed opponent, OR token reached finish
+    const shouldGetAnotherTurn = stepsToMove === 6 || bonusRoll || tokenReachedFinish;
     
     if (!shouldGetAnotherTurn) {
       // Get next player in turn order
@@ -886,9 +858,16 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
     const updatedPendingSteps = { ...pendingSteps };
     delete updatedPendingSteps[botUserId];
 
+    // Check if token reached finish position (bonus turn)
+    const tokenReachedFinish = newPosition === 61;
+    if (tokenReachedFinish) {
+      console.log(`🏠 [BOT] Token reached finish! Bot gets bonus turn.`);
+    }
+
     // Determine next turn
     let nextTurn = botUserId;
-    const shouldGetAnotherTurn = stepsToMove === 6 || bonusRoll;
+    // Bot keeps turn if: rolled 6, killed opponent, OR token reached finish
+    const shouldGetAnotherTurn = stepsToMove === 6 || bonusRoll || tokenReachedFinish;
     
     if (!shouldGetAnotherTurn) {
       nextTurn = getNextTeamTurn(room.players, botUserId);
