@@ -49,8 +49,9 @@ router.post('/:roomId/roll-dice', authenticateUser, async (req, res) => {
   try {
     const { roomId } = req.params;
     const userId = req.user.id;
+    const { clientDiceResult } = req.body; // CLIENT-FIRST: Accept client dice result
 
-    console.log(`🎲 [TEAM UP BACKEND] Roll dice - Room: ${roomId}, User: ${userId}`);
+    console.log(`🎲 [TEAM UP BACKEND] Roll dice - Room: ${roomId}, User: ${userId}, ClientDice: ${clientDiceResult}`);
 
     // Get room
     const { data: room, error: fetchError } = await supabaseAdmin
@@ -83,9 +84,15 @@ router.post('/:roomId/roll-dice', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'You must move a token first' });
     }
 
-    // Roll dice
-    const diceResult = Math.floor(Math.random() * 6) + 1;
-    console.log(`🎲 [TEAM UP BACKEND] Dice result: ${diceResult}`);
+    // CLIENT-FIRST: Use client dice result if provided and valid, otherwise generate server-side
+    let diceResult;
+    if (clientDiceResult !== undefined && clientDiceResult >= 1 && clientDiceResult <= 6) {
+      diceResult = clientDiceResult;
+      console.log(`🎲 [TEAM UP BACKEND] Using client-provided dice result: ${diceResult}`);
+    } else {
+      diceResult = Math.floor(Math.random() * 6) + 1;
+      console.log(`🎲 [TEAM UP BACKEND] Generated server dice result: ${diceResult}`);
+    }
 
     // Removed 3 consecutive sixes constraint
 
