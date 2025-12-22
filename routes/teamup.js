@@ -600,43 +600,102 @@ router.post('/:roomId/trigger-bot', async (req, res) => {
 // BOT ENDPOINTS (No auth required - bot sends its own ID)
 // ============================================
 
-// Bot Roll Dice
+// Bot Roll Dice (Optimized - No database queries needed!)
 router.post('/:roomId/bot-roll-dice', async (req, res) => {
+  const requestStartTime = Date.now();
+  const requestId = Math.random().toString(36).substring(7);
+  
+  console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] ===== REQUEST START ===== at ${new Date().toISOString()}`);
+  console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Room ID: ${req.params.roomId}`);
+  console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Bot User ID: ${req.body.botUserId}`);
+  
   try {
     const { roomId } = req.params;
-    const { botUserId } = req.body;
+    const { botUserId, gameMode, gameRoom } = req.body;
+
+    // Step 1: Validate input
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 1: Validating input...`);
+    const step1Start = Date.now();
 
     if (!botUserId) {
+      console.log(`❌ [TEAM UP BOT ROLL ${requestId}] Step 1 FAILED: botUserId is required`);
       return res.status(400).json({ error: 'botUserId is required' });
     }
 
-    console.log(`🤖 [BOT] Roll dice - Room: ${roomId}, Bot: ${botUserId}`);
-
-    const { data: room, error: fetchError } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-
-    if (fetchError || !room) {
-      return res.status(404).json({ error: 'Room not found' });
+    if (gameMode && gameRoom) {
+      console.log(`🚀 [TEAM UP BOT ROLL ${requestId}] OPTIMIZED: Using provided gameRoom data (no database query needed!)`);
+      console.log(`🚀 [TEAM UP BOT ROLL ${requestId}] Game mode: ${gameMode}`);
+    } else {
+      console.log(`⚠️ [TEAM UP BOT ROLL ${requestId}] FALLBACK: gameMode/gameRoom not provided, will query database`);
     }
 
+    const step1End = Date.now();
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 1 complete: Input validation took ${step1End - step1Start}ms`);
+
+    // Step 2: Get room data (use provided or fallback to database query)
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 2: Getting room data...`);
+    const step2Start = Date.now();
+
+    let room;
+    if (gameRoom) {
+      // Use provided room data (OPTIMIZED)
+      room = gameRoom;
+      console.log(`🚀 [TEAM UP BOT ROLL ${requestId}] Using provided room data - eliminated database query!`);
+    } else {
+      // Fallback to database query
+      console.log(`🔍 [TEAM UP BOT ROLL ${requestId}] Querying database for room...`);
+      const { data: fetchedRoom, error: fetchError } = await supabaseAdmin
+        .from('team_up_rooms')
+        .select('*')
+        .eq('room_id', roomId)
+        .single();
+
+      if (fetchError || !fetchedRoom) {
+        console.log(`❌ [TEAM UP BOT ROLL ${requestId}] Step 2 FAILED: Room not found`);
+        return res.status(404).json({ error: 'Room not found' });
+      }
+      room = fetchedRoom;
+    }
+
+    const step2End = Date.now();
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 2 complete: Get room data took ${step2End - step2Start}ms`);
+
+    // Step 3: Validate game state
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 3: Validating game state...`);
+    const step3Start = Date.now();
+
     if (room.turn !== botUserId) {
+      console.log(`❌ [TEAM UP BOT ROLL ${requestId}] Step 3 FAILED: Not bot turn. Current: ${room.turn}, Bot: ${botUserId}`);
       return res.status(403).json({ error: 'Not bot turn' });
     }
 
     if (room.game_state !== 'playing') {
+      console.log(`❌ [TEAM UP BOT ROLL ${requestId}] Step 3 FAILED: Game not playing. State: ${room.game_state}`);
       return res.status(400).json({ error: 'Game is not in playing state' });
     }
 
     const pendingSteps = room.pending_steps || {};
     if (pendingSteps[botUserId] && pendingSteps[botUserId] > 0) {
+      console.log(`❌ [TEAM UP BOT ROLL ${requestId}] Step 3 FAILED: Bot has pending steps: ${pendingSteps[botUserId]}`);
       return res.status(400).json({ error: 'Bot must move a token first' });
     }
 
+    const step3End = Date.now();
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 3 complete: Game state validation took ${step3End - step3Start}ms`);
+
+    // Step 4: Generate dice result
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 4: Generating dice result...`);
+    const step4Start = Date.now();
+
     const diceResult = Math.floor(Math.random() * 6) + 1;
-    console.log(`🎲 [BOT] Dice result: ${diceResult}`);
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Dice result: ${diceResult}`);
+
+    const step4End = Date.now();
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 4 complete: Generated dice ${diceResult}, took ${step4End - step4Start}ms`);
+
+    // Step 5: Handle consecutive sixes logic
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 5: Checking consecutive sixes...`);
+    const step5Start = Date.now();
 
     const consecutiveSixes = room.consecutive_sixes || {};
     let currentCount = consecutiveSixes[botUserId] || 0;
@@ -648,7 +707,7 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
     }
 
     if (currentCount >= 3) {
-      console.log(`⚠️ [BOT] 3 consecutive 6s! Cancelling turn`);
+      console.log(`⚠️ [TEAM UP BOT ROLL ${requestId}] 3 consecutive 6s! Cancelling turn`);
       const updatedConsecutiveSixes = { ...consecutiveSixes, [botUserId]: 0 };
       const nextTurn = getNextTeamTurn(room.players, botUserId);
       
@@ -667,12 +726,25 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
 
       if (updateError) throw updateError;
 
+      const step5End = Date.now();
+      const totalTime = Date.now() - requestStartTime;
+      console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 5 complete: Consecutive sixes check took ${step5End - step5Start}ms`);
+      console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] ===== REQUEST COMPLETE (TURN CANCELLED) ===== Total time: ${totalTime}ms`);
+      
       return res.json({ success: true, turnCancelled: true, room: updatedRoom });
     }
 
+    const step5End = Date.now();
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 5 complete: Consecutive sixes check took ${step5End - step5Start}ms`);
+
+    // Step 6: Update database
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 6: Updating database...`);
+    const step6Start = Date.now();
+
     const updatedConsecutiveSixes = { ...consecutiveSixes, [botUserId]: currentCount };
 
-    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+    // Optimized: Update without .select() to avoid extra round-trip
+    const { error: updateError } = await supabaseAdmin
       .from('team_up_rooms')
       .update({
         dice_result: diceResult,
@@ -680,16 +752,54 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
         consecutive_sixes: updatedConsecutiveSixes,
         updated_at: new Date().toISOString(),
       })
-      .eq('room_id', roomId)
-      .select()
-      .single();
+      .eq('room_id', roomId);
 
-    if (updateError) throw updateError;
+    const step6End = Date.now();
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 6 complete: Database update took ${step6End - step6Start}ms`);
 
-    console.log(`✅ [BOT] Dice rolled successfully`);
-    res.json({ success: true, diceResult, room: updatedRoom });
+    if (updateError) {
+      console.log(`❌ [TEAM UP BOT ROLL ${requestId}] Step 6 FAILED: Database update error:`, updateError);
+      throw updateError;
+    }
+
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Database updated successfully`);
+
+    // Step 7: Send response
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Step 7: Sending response...`);
+    const step7Start = Date.now();
+
+    // Return the room with updated dice values
+    const updatedGameRoom = {
+      ...room,
+      dice_result: diceResult,
+      dice_state: 'rolling',
+      consecutive_sixes: updatedConsecutiveSixes
+    };
+
+    const response = { success: true, diceResult, room: updatedGameRoom };
+    res.json(response);
+
+    const step7End = Date.now();
+    const totalTime = Date.now() - requestStartTime;
+    
+    console.log(`✅ [TEAM UP BOT ROLL ${requestId}] Step 7 complete: Response sent, took ${step7End - step7Start}ms`);
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] ===== REQUEST COMPLETE ===== Total time: ${totalTime}ms`);
+    console.log(`🎲 [TEAM UP BOT ROLL ${requestId}] Breakdown:`);
+    console.log(`   - Input validation: ${step1End - step1Start}ms`);
+    console.log(`   - Get room data: ${step2End - step2Start}ms`);
+    console.log(`   - Game state validation: ${step3End - step3Start}ms`);
+    console.log(`   - Generate dice: ${step4End - step4Start}ms`);
+    console.log(`   - Consecutive sixes check: ${step5End - step5Start}ms`);
+    console.log(`   - Database update: ${step6End - step6Start}ms`);
+    console.log(`   - Send response: ${step7End - step7Start}ms`);
+    if (gameRoom) {
+      console.log(`🚀 [TEAM UP BOT ROLL ${requestId}] OPTIMIZATION: Eliminated database query! Saved ~50-1000ms`);
+    }
+    
   } catch (error) {
-    console.error('Error rolling dice for bot:', error);
+    const totalTime = Date.now() - requestStartTime;
+    console.error(`❌ [TEAM UP BOT ROLL ${requestId}] ERROR after ${totalTime}ms:`, error);
+    console.error(`❌ [TEAM UP BOT ROLL ${requestId}] Error stack:`, error.stack);
     res.status(500).json({ error: error.message });
   }
 });
