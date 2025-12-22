@@ -8,6 +8,7 @@ import botsRouter from './routes/bots.js';
 import friendRoomsRouter from './routes/friendRooms.js';
 import tournamentsRouter from './routes/tournaments.js';
 import teamupRouter from './routes/teamup.js';
+import chatRouter from './routes/chat.js';
 
 // Import config
 import { supabaseAdmin } from './config/supabase.js';
@@ -57,6 +58,9 @@ app.use('/api/friend-rooms', friendRoomsRouter);
 
 // Tournament routes
 app.use('/api/tournaments', tournamentsRouter);
+
+// Chat routes (messages and gifts)
+app.use('/api/chat', chatRouter);
 
 // ============================================
 // GAME ROOM ENDPOINTS
