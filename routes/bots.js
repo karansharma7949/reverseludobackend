@@ -15,74 +15,142 @@ const router = express.Router();
 
 // Helper function to find room in game_rooms, friend_rooms, or tournament_rooms
 async function findGameRoom(roomId) {
+  const startTime = Date.now();
+  console.log(`🔍 [FIND ROOM] Starting search for room: ${roomId} at ${new Date().toISOString()}`);
+  
   // First try game_rooms
+  console.log(`🔍 [FIND ROOM] Step 1: Querying game_rooms table...`);
+  const gameRoomsStart = Date.now();
   let { data: gameRoom, error } = await supabaseAdmin
     .from('game_rooms')
     .select('*')
     .eq('room_id', roomId)
     .single();
+  const gameRoomsEnd = Date.now();
+  console.log(`🔍 [FIND ROOM] Step 1 complete: game_rooms query took ${gameRoomsEnd - gameRoomsStart}ms`);
 
   if (gameRoom) {
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ [FIND ROOM] Found in game_rooms! Total time: ${totalTime}ms`);
     return { gameRoom, tableName: 'game_rooms' };
   }
 
   // If not found, try friend_rooms
+  console.log(`🔍 [FIND ROOM] Step 2: Not found in game_rooms, querying friend_rooms table...`);
+  const friendRoomsStart = Date.now();
   const { data: friendRoom, error: friendError } = await supabaseAdmin
     .from('friend_rooms')
     .select('*')
     .eq('room_id', roomId)
     .single();
+  const friendRoomsEnd = Date.now();
+  console.log(`🔍 [FIND ROOM] Step 2 complete: friend_rooms query took ${friendRoomsEnd - friendRoomsStart}ms`);
 
   if (friendRoom) {
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ [FIND ROOM] Found in friend_rooms! Total time: ${totalTime}ms`);
     return { gameRoom: friendRoom, tableName: 'friend_rooms' };
   }
 
   // If not found, try tournament_rooms
+  console.log(`🔍 [FIND ROOM] Step 3: Not found in friend_rooms, querying tournament_rooms table...`);
+  const tournamentRoomsStart = Date.now();
   const { data: tournamentRoom, error: tournamentError } = await supabaseAdmin
     .from('tournament_rooms')
     .select('*')
     .eq('room_id', roomId)
     .single();
+  const tournamentRoomsEnd = Date.now();
+  console.log(`🔍 [FIND ROOM] Step 3 complete: tournament_rooms query took ${tournamentRoomsEnd - tournamentRoomsStart}ms`);
 
   if (tournamentRoom) {
+    const totalTime = Date.now() - startTime;
+    console.log(`✅ [FIND ROOM] Found in tournament_rooms! Total time: ${totalTime}ms`);
     return { gameRoom: tournamentRoom, tableName: 'tournament_rooms' };
   }
 
+  const totalTime = Date.now() - startTime;
+  console.log(`❌ [FIND ROOM] Room not found in any table! Total search time: ${totalTime}ms`);
   return { gameRoom: null, tableName: null };
 }
 
 // Bot Roll Dice (No auth required - bot sends its own ID)
 router.post('/:roomId/bot-roll-dice', async (req, res) => {
+  const requestStartTime = Date.now();
+  const requestId = Math.random().toString(36).substring(7);
+  
+  console.log(`🎲 [BOT ROLL ${requestId}] ===== REQUEST START ===== at ${new Date().toISOString()}`);
+  console.log(`🎲 [BOT ROLL ${requestId}] Room ID: ${req.params.roomId}`);
+  console.log(`🎲 [BOT ROLL ${requestId}] Bot User ID: ${req.body.botUserId}`);
+  
   try {
     const { roomId } = req.params;
     const { botUserId } = req.body;
 
+    // Step 1: Validate input
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 1: Validating input...`);
+    const step1Start = Date.now();
+    
     if (!botUserId) {
+      console.log(`❌ [BOT ROLL ${requestId}] Step 1 FAILED: botUserId is required`);
       return res.status(400).json({ error: 'botUserId is required' });
     }
+    
+    const step1End = Date.now();
+    console.log(`✅ [BOT ROLL ${requestId}] Step 1 complete: Input validation took ${step1End - step1Start}ms`);
 
+    // Step 2: Find game room
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 2: Finding game room...`);
+    const step2Start = Date.now();
+    
     const { gameRoom, tableName } = await findGameRoom(roomId);
+    
+    const step2End = Date.now();
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 2 complete: Find room took ${step2End - step2Start}ms`);
 
     if (!gameRoom) {
+      console.log(`❌ [BOT ROLL ${requestId}] Step 2 FAILED: Game room not found`);
       return res.status(404).json({ error: 'Game room not found' });
     }
+    
+    console.log(`🎲 [BOT ROLL ${requestId}] Found room in table: ${tableName}`);
+
+    // Step 3: Validate game state
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 3: Validating game state...`);
+    const step3Start = Date.now();
 
     if (gameRoom.turn !== botUserId) {
+      console.log(`❌ [BOT ROLL ${requestId}] Step 3 FAILED: Not bot turn. Current turn: ${gameRoom.turn}, Bot: ${botUserId}`);
       return res.status(403).json({ error: 'Not bot turn' });
     }
 
     if (gameRoom.game_state !== 'playing') {
+      console.log(`❌ [BOT ROLL ${requestId}] Step 3 FAILED: Game not playing. State: ${gameRoom.game_state}`);
       return res.status(400).json({ error: 'Game is not in playing state' });
     }
 
     const pendingSteps = gameRoom.pending_steps || {};
     if (pendingSteps[botUserId] && pendingSteps[botUserId] > 0) {
+      console.log(`❌ [BOT ROLL ${requestId}] Step 3 FAILED: Bot has pending steps: ${pendingSteps[botUserId]}`);
       return res.status(400).json({ error: 'Bot must move a token first' });
     }
 
-    const diceResult = Math.floor(Math.random() * 6) + 1;
+    const step3End = Date.now();
+    console.log(`✅ [BOT ROLL ${requestId}] Step 3 complete: Game state validation took ${step3End - step3Start}ms`);
 
-    // Removed 3 consecutive sixes constraint for bots
+    // Step 4: Generate dice result
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 4: Generating dice result...`);
+    const step4Start = Date.now();
+    
+    const diceResult = Math.floor(Math.random() * 6) + 1;
+    
+    const step4End = Date.now();
+    console.log(`✅ [BOT ROLL ${requestId}] Step 4 complete: Generated dice ${diceResult}, took ${step4End - step4Start}ms`);
+
+    // Step 5: Update database
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 5: Updating database...`);
+    console.log(`🎲 [BOT ROLL ${requestId}] Updating table: ${tableName} with dice_result: ${diceResult}`);
+    const step5Start = Date.now();
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from(tableName)
@@ -94,11 +162,40 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
       .select()
       .single();
 
-    if (updateError) throw updateError;
+    const step5End = Date.now();
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 5 complete: Database update took ${step5End - step5Start}ms`);
 
-    res.json({ success: true, diceResult, gameRoom: updatedRoom });
+    if (updateError) {
+      console.log(`❌ [BOT ROLL ${requestId}] Step 5 FAILED: Database update error:`, updateError);
+      throw updateError;
+    }
+
+    console.log(`✅ [BOT ROLL ${requestId}] Database updated successfully`);
+
+    // Step 6: Send response
+    console.log(`🎲 [BOT ROLL ${requestId}] Step 6: Sending response...`);
+    const step6Start = Date.now();
+
+    const response = { success: true, diceResult, gameRoom: updatedRoom };
+    res.json(response);
+
+    const step6End = Date.now();
+    const totalTime = Date.now() - requestStartTime;
+    
+    console.log(`✅ [BOT ROLL ${requestId}] Step 6 complete: Response sent, took ${step6End - step6Start}ms`);
+    console.log(`🎲 [BOT ROLL ${requestId}] ===== REQUEST COMPLETE ===== Total time: ${totalTime}ms`);
+    console.log(`🎲 [BOT ROLL ${requestId}] Breakdown:`);
+    console.log(`   - Input validation: ${step1End - step1Start}ms`);
+    console.log(`   - Find room: ${step2End - step2Start}ms`);
+    console.log(`   - Game state validation: ${step3End - step3Start}ms`);
+    console.log(`   - Generate dice: ${step4End - step4Start}ms`);
+    console.log(`   - Database update: ${step5End - step5Start}ms`);
+    console.log(`   - Send response: ${step6End - step6Start}ms`);
+    
   } catch (error) {
-    console.error('Error rolling dice for bot:', error);
+    const totalTime = Date.now() - requestStartTime;
+    console.error(`❌ [BOT ROLL ${requestId}] ERROR after ${totalTime}ms:`, error);
+    console.error(`❌ [BOT ROLL ${requestId}] Error stack:`, error.stack);
     res.status(500).json({ error: error.message });
   }
 });
