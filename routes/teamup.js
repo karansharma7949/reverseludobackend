@@ -308,8 +308,9 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     const movingTokenGridPos = getBoardPosition(color, newPos, noOfPlayers);
     
     // Only check kills if not on safe spot and not in home column
-    const starPositions = [1, 9, 14, 22, 27, 35, 40, 48]; // Safe positions for 4-player
-    const isOnSafeSpot = starPositions.includes(newPos);
+    // CORRECT safe positions for 4-player board (from positions.js)
+    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
+    const isOnSafeSpot = safePositions.includes(newPos);
     
     if (!isOnSafeSpot && newPos > 0 && newPos < 61 && movingTokenGridPos) {
       for (const [otherColor, otherTokens] of Object.entries(updatedPositions)) {
@@ -507,23 +508,42 @@ async function handleBotTurn(roomId, botUserId) {
     if (!positions[botColor]) positions[botColor] = {};
     positions[botColor] = { ...positions[botColor], [bestMove.tokenName]: bestMove.to };
 
-    // Check for kills
+    // Check for kills using grid coordinates (opponent team only)
     const killedTokens = [];
     let bonusRoll = false;
+    const noOfPlayers = 4;
     
-    for (const [otherColor, otherTokens] of Object.entries(positions)) {
-      if (otherColor === botColor) continue;
-      
-      const isTeamA = ['red', 'blue'].includes(botColor);
-      const otherIsTeamA = ['red', 'blue'].includes(otherColor);
-      if (isTeamA === otherIsTeamA) continue;
-      
-      for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
-        if (otherPos === bestMove.to && otherPos > 0 && otherPos < 61) {
-          positions[otherColor] = { ...positions[otherColor], [otherTokenName]: 0 };
-          killedTokens.push(`${otherColor}:${otherTokenName}`);
-          bonusRoll = true;
-          console.log(`💀 [BOT AI] Bot killed ${otherColor} ${otherTokenName}`);
+    // Get grid position of moving token
+    const movingTokenGridPos = getBoardPosition(botColor, bestMove.to, noOfPlayers);
+    
+    // CORRECT safe positions for 4-player board
+    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
+    const isOnSafeSpot = safePositions.includes(bestMove.to);
+    
+    if (!isOnSafeSpot && bestMove.to > 0 && bestMove.to < 61 && movingTokenGridPos) {
+      for (const [otherColor, otherTokens] of Object.entries(positions)) {
+        if (otherColor === botColor) continue;
+        
+        // Check if same team (Team A: red+blue, Team B: green+yellow)
+        const isTeamA = ['red', 'blue'].includes(botColor);
+        const otherIsTeamA = ['red', 'blue'].includes(otherColor);
+        if (isTeamA === otherIsTeamA) continue; // Skip teammate
+        
+        for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
+          if (otherPos <= 0 || otherPos >= 61) continue; // Skip home and finish
+          
+          // Get grid position of opponent token
+          const opponentGridPos = getBoardPosition(otherColor, otherPos, noOfPlayers);
+          
+          // Compare grid coordinates
+          if (opponentGridPos && movingTokenGridPos.pos[0] === opponentGridPos.pos[0] && 
+              movingTokenGridPos.pos[1] === opponentGridPos.pos[1]) {
+            // Kill opponent token
+            positions[otherColor] = { ...positions[otherColor], [otherTokenName]: 0 };
+            killedTokens.push(`${otherColor}:${otherTokenName}`);
+            bonusRoll = true;
+            console.log(`💀 [BOT AI] ${botColor} ${bestMove.tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${otherColor} ${otherTokenName} (grid: [${opponentGridPos.pos}])`);
+          }
         }
       }
     }
@@ -952,21 +972,40 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
     if (!updatedPositions[color]) updatedPositions[color] = {};
     updatedPositions[color] = { ...updatedPositions[color], [tokenName]: newPosition };
 
-    // Check for kills (opponent team only)
+    // Check for kills using grid coordinates (opponent team only)
     let bonusRoll = false;
+    const noOfPlayers = 4;
     
-    for (const [otherColor, otherTokens] of Object.entries(updatedPositions)) {
-      if (otherColor === color) continue;
-      
-      const isTeamA = ['red', 'blue'].includes(color);
-      const otherIsTeamA = ['red', 'blue'].includes(otherColor);
-      if (isTeamA === otherIsTeamA) continue;
-      
-      for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
-        if (otherPos === newPosition && otherPos > 0 && otherPos < 61) {
-          updatedPositions[otherColor] = { ...updatedPositions[otherColor], [otherTokenName]: 0 };
-          bonusRoll = true;
-          console.log(`💀 [BOT] Killed ${otherColor} ${otherTokenName}`);
+    // Get grid position of moving token
+    const movingTokenGridPos = getBoardPosition(color, newPosition, noOfPlayers);
+    
+    // CORRECT safe positions for 4-player board
+    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
+    const isOnSafeSpot = safePositions.includes(newPosition);
+    
+    if (!isOnSafeSpot && newPosition > 0 && newPosition < 61 && movingTokenGridPos) {
+      for (const [otherColor, otherTokens] of Object.entries(updatedPositions)) {
+        if (otherColor === color) continue;
+        
+        // Check if same team (Team A: red+blue, Team B: green+yellow)
+        const isTeamA = ['red', 'blue'].includes(color);
+        const otherIsTeamA = ['red', 'blue'].includes(otherColor);
+        if (isTeamA === otherIsTeamA) continue; // Skip teammate
+        
+        for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
+          if (otherPos <= 0 || otherPos >= 61) continue; // Skip home and finish
+          
+          // Get grid position of opponent token
+          const opponentGridPos = getBoardPosition(otherColor, otherPos, noOfPlayers);
+          
+          // Compare grid coordinates
+          if (opponentGridPos && movingTokenGridPos.pos[0] === opponentGridPos.pos[0] && 
+              movingTokenGridPos.pos[1] === opponentGridPos.pos[1]) {
+            // Kill opponent token
+            updatedPositions[otherColor] = { ...updatedPositions[otherColor], [otherTokenName]: 0 };
+            bonusRoll = true;
+            console.log(`💀 [BOT] ${color} ${tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${otherColor} ${otherTokenName} (grid: [${opponentGridPos.pos}])`);
+          }
         }
       }
     }
