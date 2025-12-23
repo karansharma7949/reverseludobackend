@@ -1062,4 +1062,310 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
   }
 });
 
+// ============================================
+// PLAYER LEAVE/DISCONNECT HANDLING
+// ============================================
+
+// Helper: Check if user is a bot
+function isBot(userId) {
+  return userId && userId.startsWith('00000000-');
+}
+
+// Helper: Get next active player (skip escaped players)
+function getNextActivePlayer(players, escapedPlayers, currentUserId) {
+  const turnOrder = ['red', 'green', 'blue', 'yellow'];
+  const currentColor = players[currentUserId];
+  
+  if (!currentColor) return null;
+  
+  const currentIndex = turnOrder.indexOf(currentColor);
+  if (currentIndex === -1) return null;
+  
+  // Try each player in turn order
+  for (let i = 1; i <= 4; i++) {
+    const nextIndex = (currentIndex + i) % turnOrder.length;
+    const nextColor = turnOrder[nextIndex];
+    
+    // Find userId with next color
+    for (const [userId, color] of Object.entries(players)) {
+      if (color === nextColor && !escapedPlayers.includes(userId)) {
+        return userId;
+      }
+    }
+  }
+  
+  return null;
+}
+
+// Helper: Check if all remaining players are bots
+function areAllRemainingPlayersBots(players, escapedPlayers) {
+  for (const [userId, color] of Object.entries(players)) {
+    if (!escapedPlayers.includes(userId) && !isBot(userId)) {
+      return false; // Found a real player
+    }
+  }
+  return true; // All remaining are bots
+}
+
+// Intentional Leave - Player confirms leaving the game
+router.post('/:roomId/leave-game', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    console.log(`🚪 [LEAVE] Player ${userId} leaving room ${roomId}`);
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    // If game hasn't started, just remove player from waiting room
+    if (room.game_state !== 'playing') {
+      console.log(`🚪 [LEAVE] Game not started, removing from waiting room`);
+      
+      let updatedTeamA = [...(room.team_a || [])].filter(id => id !== userId);
+      let updatedTeamB = [...(room.team_b || [])].filter(id => id !== userId);
+      let updatedPlayers = { ...room.players };
+      delete updatedPlayers[userId];
+      
+      // If room is empty, delete it
+      if (Object.keys(updatedPlayers).length === 0) {
+        await supabaseAdmin.from('team_up_rooms').delete().eq('room_id', roomId);
+        return res.json({ success: true, roomDeleted: true });
+      }
+      
+      await supabaseAdmin
+        .from('team_up_rooms')
+        .update({
+          team_a: updatedTeamA,
+          team_b: updatedTeamB,
+          players: updatedPlayers,
+          status: 'open',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('room_id', roomId);
+      
+      return res.json({ success: true, leftWaitingRoom: true });
+    }
+
+    // Game is in progress - handle intentional leave
+    const playerColor = room.players[userId];
+    if (!playerColor) {
+      return res.status(400).json({ error: 'Player not in this room' });
+    }
+
+    // Add to escaped players
+    let escapedPlayers = [...(room.escaped_players || [])];
+    if (!escapedPlayers.includes(userId)) {
+      escapedPlayers.push(userId);
+    }
+
+    // Remove player's tokens from board (set all to 0)
+    let updatedPositions = { ...room.positions };
+    if (updatedPositions[playerColor]) {
+      updatedPositions[playerColor] = {
+        tokenA: 0,
+        tokenB: 0,
+        tokenC: 0,
+        tokenD: 0,
+      };
+    }
+
+    // Check if all remaining players are bots
+    const allRemainingAreBots = areAllRemainingPlayersBots(room.players, escapedPlayers);
+    
+    if (allRemainingAreBots) {
+      // Delete the room entirely
+      console.log(`🗑️ [LEAVE] All remaining players are bots, deleting room`);
+      await supabaseAdmin.from('team_up_rooms').delete().eq('room_id', roomId);
+      return res.json({ success: true, roomDeleted: true, reason: 'all_bots_remaining' });
+    }
+
+    // Pass turn if it was this player's turn
+    let nextTurn = room.turn;
+    if (room.turn === userId) {
+      nextTurn = getNextActivePlayer(room.players, escapedPlayers, userId);
+      console.log(`🔄 [LEAVE] Passing turn from ${userId} to ${nextTurn}`);
+    }
+
+    // Clear pending steps for leaving player
+    let updatedPendingSteps = { ...room.pending_steps };
+    delete updatedPendingSteps[userId];
+
+    // Check if game should end (only one team left)
+    const teamAActive = (room.team_a || []).filter(id => !escapedPlayers.includes(id));
+    const teamBActive = (room.team_b || []).filter(id => !escapedPlayers.includes(id));
+    
+    let gameState = room.game_state;
+    let winners = room.winners || [];
+    
+    if (teamAActive.length === 0 && teamBActive.length > 0) {
+      // Team B wins
+      gameState = 'finished';
+      winners = teamBActive;
+      console.log(`🏆 [LEAVE] Team B wins by forfeit`);
+    } else if (teamBActive.length === 0 && teamAActive.length > 0) {
+      // Team A wins
+      gameState = 'finished';
+      winners = teamAActive;
+      console.log(`🏆 [LEAVE] Team A wins by forfeit`);
+    }
+
+    // Update room
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        escaped_players: escapedPlayers,
+        positions: updatedPositions,
+        turn: nextTurn,
+        dice_state: 'waiting',
+        dice_result: null,
+        pending_steps: updatedPendingSteps,
+        game_state: gameState,
+        winners: winners,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    console.log(`✅ [LEAVE] Player ${userId} (${playerColor}) left successfully`);
+    res.json({ 
+      success: true, 
+      room: updatedRoom,
+      playerColor,
+      gameEnded: gameState === 'finished',
+    });
+  } catch (error) {
+    console.error('Error leaving game:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Player Disconnect - Mark player as disconnected (bot takes over)
+router.post('/:roomId/player-disconnect', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    console.log(`📡 [DISCONNECT] Player ${userId} disconnected from room ${roomId}`);
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    if (room.game_state !== 'playing') {
+      return res.json({ success: true, message: 'Game not in progress' });
+    }
+
+    // Add to disconnected players list
+    let disconnectedPlayers = [...(room.disconnected_players || [])];
+    if (!disconnectedPlayers.includes(userId)) {
+      disconnectedPlayers.push(userId);
+    }
+
+    // Update room
+    await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        disconnected_players: disconnectedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId);
+
+    console.log(`✅ [DISCONNECT] Player ${userId} marked as disconnected, bot will take over`);
+    res.json({ success: true, botTakeover: true });
+  } catch (error) {
+    console.error('Error handling disconnect:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Player Reconnect - Player comes back online
+router.post('/:roomId/player-reconnect', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    console.log(`🔌 [RECONNECT] Player ${userId} reconnecting to room ${roomId}`);
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    // Check if player was in this room
+    if (!room.players[userId]) {
+      return res.status(400).json({ error: 'Player not in this room' });
+    }
+
+    // Check if player has escaped (can't reconnect after intentional leave)
+    if ((room.escaped_players || []).includes(userId)) {
+      return res.status(400).json({ error: 'Cannot reconnect after leaving game' });
+    }
+
+    // Remove from disconnected players
+    let disconnectedPlayers = [...(room.disconnected_players || [])].filter(id => id !== userId);
+
+    // Update room
+    await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        disconnected_players: disconnectedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId);
+
+    console.log(`✅ [RECONNECT] Player ${userId} reconnected successfully`);
+    res.json({ success: true, room });
+  } catch (error) {
+    console.error('Error handling reconnect:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Check if player should be controlled by bot (for turn handling)
+router.get('/:roomId/should-bot-play/:userId', async (req, res) => {
+  try {
+    const { roomId, userId } = req.params;
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const disconnectedPlayers = room.disconnected_players || [];
+    const shouldBotPlay = disconnectedPlayers.includes(userId) || isBot(userId);
+
+    res.json({ shouldBotPlay, isDisconnected: disconnectedPlayers.includes(userId) });
+  } catch (error) {
+    console.error('Error checking bot play:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
