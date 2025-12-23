@@ -1278,7 +1278,23 @@ router.post('/:roomId/player-disconnect', authenticateUser, async (req, res) => 
       disconnectedPlayers.push(userId);
     }
 
-    // Update room
+    // Check if all remaining active players are bots after this disconnect
+    const allPlayerIds = Object.keys(room.players);
+    const escapedPlayers = room.escaped_players || [];
+    const activePlayerIds = allPlayerIds.filter(id => 
+      !escapedPlayers.includes(id) && !disconnectedPlayers.includes(id)
+    );
+
+    // If all remaining active players are bots, delete the room
+    const allRemainingAreBots = activePlayerIds.every(id => isBot(id));
+    
+    if (allRemainingAreBots) {
+      console.log(`🗑️ [DISCONNECT] All remaining players are bots after ${userId} disconnect, deleting room`);
+      await supabaseAdmin.from('team_up_rooms').delete().eq('room_id', roomId);
+      return res.json({ success: true, roomDeleted: true, reason: 'all_remaining_are_bots' });
+    }
+
+    // Update room with disconnected player
     await supabaseAdmin
       .from('team_up_rooms')
       .update({
