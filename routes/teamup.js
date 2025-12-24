@@ -1107,6 +1107,89 @@ function areAllRemainingPlayersBots(players, escapedPlayers) {
   return true; // All remaining are bots
 }
 
+// Import bot service
+import { startBotService, stopBotService } from '../services/botService.js';
+
+// Start Game - Initialize game and start bot service
+router.post('/:roomId/start-game', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    console.log(`🎮 [START GAME] Starting game in room ${roomId}`);
+
+    // Get room
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    // Check if room is full
+    const totalPlayers = room.team_a.length + room.team_b.length;
+    if (totalPlayers < 4) {
+      return res.status(400).json({ error: 'Room is not full yet' });
+    }
+
+    // Check if game already started
+    if (room.game_state === 'playing') {
+      return res.status(400).json({ error: 'Game already started' });
+    }
+
+    // Assign colors to players
+    const players = {};
+    if (room.team_a[0]) players[room.team_a[0]] = 'red';
+    if (room.team_a[1]) players[room.team_a[1]] = 'blue';
+    if (room.team_b[0]) players[room.team_b[0]] = 'green';
+    if (room.team_b[1]) players[room.team_b[1]] = 'yellow';
+
+    // Set first turn (red always starts)
+    const firstTurn = room.team_a[0];
+
+    // Update room to playing state
+    const { error: updateError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        game_state: 'playing',
+        players: players,
+        turn: firstTurn,
+        dice_state: 'waiting',
+        status: 'in_progress',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId);
+
+    if (updateError) throw updateError;
+
+    console.log(`✅ [START GAME] Game started in room ${roomId}`);
+    console.log(`   Players: ${JSON.stringify(players)}`);
+    console.log(`   First turn: ${firstTurn}`);
+
+    // Start bot service for this room
+    try {
+      await startBotService(roomId);
+      console.log(`🤖 [START GAME] Bot service started for room ${roomId}`);
+    } catch (botError) {
+      console.error(`⚠️ [START GAME] Failed to start bot service:`, botError);
+      // Don't fail the request, game can still work without backend bots
+    }
+
+    res.json({
+      success: true,
+      message: 'Game started',
+      players,
+      firstTurn,
+    });
+  } catch (error) {
+    console.error(`❌ [START GAME] Error:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Intentional Leave - Player confirms leaving the game
 router.post('/:roomId/leave-game', authenticateUser, async (req, res) => {
   try {

@@ -9,6 +9,7 @@ import friendRoomsRouter from './routes/friendRooms.js';
 import tournamentsRouter from './routes/tournaments.js';
 import teamupRouter from './routes/teamup.js';
 import chatRouter from './routes/chat.js';
+import teamupBotsRouter from './routes/teamupBots.js';
 
 // Import config
 import { supabaseAdmin } from './config/supabase.js';
@@ -52,6 +53,9 @@ app.use('/api/game-rooms', botsRouter);
 
 // Team up routes
 app.use('/api/team-up-rooms', teamupRouter);
+
+// Team up bot routes
+app.use('/api/teamup-bots', teamupBotsRouter);
 
 // Friend room routes
 app.use('/api/friend-rooms', friendRoomsRouter);
