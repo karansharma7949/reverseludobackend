@@ -1108,7 +1108,7 @@ function areAllRemainingPlayersBots(players, escapedPlayers) {
 }
 
 // Import bot service
-import { startBotService, stopBotService } from '../services/botService.js';
+import { startBotPlayersForRoom, stopBotPlayersForRoom } from '../services/botPlayerService.js';
 
 // Start Game - Initialize game and start bot service
 router.post('/:roomId/start-game', authenticateUser, async (req, res) => {
@@ -1169,13 +1169,13 @@ router.post('/:roomId/start-game', authenticateUser, async (req, res) => {
     console.log(`   Players: ${JSON.stringify(players)}`);
     console.log(`   First turn: ${firstTurn}`);
 
-    // Start bot service for this room
+    // Start bot players for this room (they will subscribe and play autonomously)
     try {
-      await startBotService(roomId);
-      console.log(`🤖 [START GAME] Bot service started for room ${roomId}`);
+      const startedBots = await startBotPlayersForRoom(roomId);
+      console.log(`🤖 [START GAME] Started ${startedBots.length} bot players for room ${roomId}`);
     } catch (botError) {
-      console.error(`⚠️ [START GAME] Failed to start bot service:`, botError);
-      // Don't fail the request, game can still work without backend bots
+      console.error(`⚠️ [START GAME] Failed to start bot players:`, botError);
+      // Don't fail the request, game can still work
     }
 
     res.json({

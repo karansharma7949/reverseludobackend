@@ -2,300 +2,240 @@
  * Team Up Bot Routes
  * 
  * API endpoints for managing bots in Team Up mode
+ * Bots join rooms like real players and play autonomously
  */
 
 import express from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import {
-  isBot,
   FIXED_BOT_IDS,
-  handleBotTurn,
-  startBotService,
-  stopBotService,
-  botRollDice,
-  botCompleteDice,
-  botMoveToken,
-} from '../services/botService.js';
+  BOT_PROFILES,
+  isBot,
+  getBotProfile,
+  addBotToRoom,
+  fillRoomWithBots,
+  startBotPlayersForRoom,
+  stopBotPlayersForRoom,
+  getActiveBotCount,
+} from '../services/botPlayerService.js';
 
 const router = express.Router();
 
 // ============================================
-// START BOT SERVICE FOR A ROOM
+// ADD SINGLE BOT TO ROOM
 // ============================================
 
 /**
- * POST /teamup-bots/:roomId/start
- * Start the bot service for a room (called when game starts)
+ * POST /teamup-bots/:roomId/add-bot
+ * Add a single bot to a room (like a player joining)
  */
-router.post('/:roomId/start', async (req, res) => {
+router.post('/:roomId/add-bot', async (req, res) => {
   try {
     const { roomId } = req.params;
-    
-    console.log(`🚀 [TEAMUP BOTS] Starting bot service for room ${roomId}`);
-    
-    // Verify room exists
-    const { data: room, error } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-    
-    if (error || !room) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-    
-    // Start bot service
-    await startBotService(roomId);
-    
-    res.json({ 
-      success: true, 
-      message: 'Bot service started',
-      roomId,
+    const { botIndex } = req.body;
+
+    console.log(`🤖 [TEAMUP BOTS] Adding bot to room ${roomId}`);
+
+    const result = await addBotToRoom(roomId, botIndex || 0);
+
+    res.json({
+      success: true,
+      botId: result.botId,
+      message: result.alreadyInRoom ? 'Bot already in room' : 'Bot added to room',
     });
   } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error starting bot service:`, error);
+    console.error(`❌ [TEAMUP BOTS] Error adding bot:`, error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // ============================================
-// STOP BOT SERVICE FOR A ROOM
+// FILL ROOM WITH BOTS
 // ============================================
 
 /**
- * POST /teamup-bots/:roomId/stop
- * Stop the bot service for a room (called when game ends)
+ * POST /teamup-bots/:roomId/fill
+ * Fill the room with bots to reach 4 players
  */
-router.post('/:roomId/stop', async (req, res) => {
+router.post('/:roomId/fill', async (req, res) => {
   try {
     const { roomId } = req.params;
-    
-    console.log(`🛑 [TEAMUP BOTS] Stopping bot service for room ${roomId}`);
-    
-    await stopBotService(roomId);
-    
-    res.json({ 
-      success: true, 
-      message: 'Bot service stopped',
-      roomId,
+
+    console.log(`🤖 [TEAMUP BOTS] Filling room ${roomId} with bots`);
+
+    const addedBots = await fillRoomWithBots(roomId);
+
+    res.json({
+      success: true,
+      addedBots,
+      count: addedBots.length,
+      message: `Added ${addedBots.length} bots to room`,
     });
   } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error stopping bot service:`, error);
+    console.error(`❌ [TEAMUP BOTS] Error filling room:`, error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // ============================================
-// TRIGGER BOT TURN (MANUAL)
+// START BOT PLAYERS (AFTER GAME STARTS)
+// ============================================
+
+/**
+ * POST /teamup-bots/:roomId/start-players
+ * Start bot players for a room (they will subscribe and play)
+ */
+router.post('/:roomId/start-players', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+
+    console.log(`🚀 [TEAMUP BOTS] Starting bot players for room ${roomId}`);
+
+    const startedBots = await startBotPlayersForRoom(roomId);
+
+    res.json({
+      success: true,
+      startedBots,
+      count: startedBots.length,
+      message: `Started ${startedBots.length} bot players`,
+    });
+  } catch (error) {
+    console.error(`❌ [TEAMUP BOTS] Error starting bot players:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// STOP BOT PLAYERS
+// ============================================
+
+/**
+ * POST /teamup-bots/:roomId/stop-players
+ * Stop all bot players for a room
+ */
+router.post('/:roomId/stop-players', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+
+    console.log(`🛑 [TEAMUP BOTS] Stopping bot players for room ${roomId}`);
+
+    await stopBotPlayersForRoom(roomId);
+
+    res.json({
+      success: true,
+      message: 'Bot players stopped',
+    });
+  } catch (error) {
+    console.error(`❌ [TEAMUP BOTS] Error stopping bot players:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// TRIGGER BOT (FALLBACK FOR STUCK BOTS)
 // ============================================
 
 /**
  * POST /teamup-bots/:roomId/trigger
- * Manually trigger a bot turn (fallback if realtime fails)
+ * Trigger bot players to check and play their turn (fallback for stuck bots)
  */
 router.post('/:roomId/trigger', async (req, res) => {
   try {
     const { roomId } = req.params;
-    
-    console.log(`🎮 [TEAMUP BOTS] Triggering bot turn for room ${roomId}`);
-    
+
+    console.log(`🔄 [TEAMUP BOTS] Triggering bot check for room ${roomId}`);
+
     // Get current room state
     const { data: room, error } = await supabaseAdmin
       .from('team_up_rooms')
       .select('*')
       .eq('room_id', roomId)
       .single();
-    
+
     if (error || !room) {
       return res.status(404).json({ error: 'Room not found' });
     }
-    
-    // Check if it's a bot's turn
+
+    // Check if game is playing
+    if (room.game_state !== 'playing') {
+      return res.json({
+        success: true,
+        message: 'Game not in playing state',
+        triggered: false,
+      });
+    }
+
+    // Check if current turn is a bot
     const currentTurn = room.turn;
-    if (!isBot(currentTurn)) {
-      return res.status(400).json({ error: 'Not a bot turn' });
+    if (!currentTurn || !isBot(currentTurn)) {
+      return res.json({
+        success: true,
+        message: 'Not a bot turn',
+        triggered: false,
+      });
     }
-    
-    // Handle bot turn
-    await handleBotTurn(room);
-    
-    res.json({ 
-      success: true, 
-      message: 'Bot turn triggered',
-      botId: currentTurn,
+
+    // Start bot players if not already started
+    const activeBotCount = getActiveBotCount(roomId);
+    if (activeBotCount === 0) {
+      console.log(`🚀 [TEAMUP BOTS] No active bots, starting bot players...`);
+      await startBotPlayersForRoom(roomId);
+    }
+
+    res.json({
+      success: true,
+      message: 'Bot triggered',
+      triggered: true,
+      currentTurn,
+      activeBotCount: getActiveBotCount(roomId),
     });
   } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error triggering bot turn:`, error);
+    console.error(`❌ [TEAMUP BOTS] Error triggering bot:`, error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // ============================================
-// BOT ROLL DICE
+// GET BOT STATUS
 // ============================================
 
 /**
- * POST /teamup-bots/:roomId/roll-dice
- * Bot rolls dice
+ * GET /teamup-bots/:roomId/status
+ * Get bot status for a room
  */
-router.post('/:roomId/roll-dice', async (req, res) => {
+router.get('/:roomId/status', async (req, res) => {
   try {
     const { roomId } = req.params;
-    const { botUserId } = req.body;
-    
-    console.log(`🎲 [TEAMUP BOTS] Bot ${botUserId} rolling dice in room ${roomId}`);
-    
-    if (!botUserId) {
-      return res.status(400).json({ error: 'botUserId is required' });
-    }
-    
-    // Verify it's a valid bot
-    if (!isBot(botUserId)) {
-      return res.status(400).json({ error: 'Invalid bot ID' });
-    }
-    
-    // Get room
-    const { data: room, error: fetchError } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-    
-    if (fetchError || !room) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-    
-    // Verify it's the bot's turn
-    if (room.turn !== botUserId) {
-      return res.status(403).json({ error: 'Not bot turn' });
-    }
-    
-    // Roll dice
-    const diceResult = await botRollDice(roomId, botUserId);
-    
-    res.json({ 
-      success: true, 
-      diceResult,
-    });
-  } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error rolling dice:`, error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
-// ============================================
-// BOT COMPLETE DICE
-// ============================================
+    const activeBotCount = getActiveBotCount(roomId);
 
-/**
- * POST /teamup-bots/:roomId/complete-dice
- * Bot completes dice (after animation)
- */
-router.post('/:roomId/complete-dice', async (req, res) => {
-  try {
-    const { roomId } = req.params;
-    const { botUserId } = req.body;
-    
-    console.log(`🎲 [TEAMUP BOTS] Bot ${botUserId} completing dice in room ${roomId}`);
-    
-    if (!botUserId) {
-      return res.status(400).json({ error: 'botUserId is required' });
-    }
-    
-    // Get room
-    const { data: room, error: fetchError } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-    
-    if (fetchError || !room) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-    
-    // Complete dice
-    await botCompleteDice(roomId, botUserId, room);
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error completing dice:`, error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// BOT MOVE TOKEN
-// ============================================
-
-/**
- * POST /teamup-bots/:roomId/move-token
- * Bot moves a token
- */
-router.post('/:roomId/move-token', async (req, res) => {
-  try {
-    const { roomId } = req.params;
-    const { botUserId } = req.body;
-    
-    console.log(`🎯 [TEAMUP BOTS] Bot ${botUserId} moving token in room ${roomId}`);
-    
-    if (!botUserId) {
-      return res.status(400).json({ error: 'botUserId is required' });
-    }
-    
-    // Get room
-    const { data: room, error: fetchError } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-    
-    if (fetchError || !room) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-    
-    // Move token
-    await botMoveToken(roomId, botUserId, room);
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error moving token:`, error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// CHECK IF BOT SHOULD PLAY
-// ============================================
-
-/**
- * GET /teamup-bots/:roomId/should-play/:userId
- * Check if a bot should play for a user (disconnected player)
- */
-router.get('/:roomId/should-play/:userId', async (req, res) => {
-  try {
-    const { roomId, userId } = req.params;
-    
-    // Get room
+    // Get room to see which bots are in it
     const { data: room, error } = await supabaseAdmin
       .from('team_up_rooms')
-      .select('disconnected_players')
+      .select('team_a, team_b, players')
       .eq('room_id', roomId)
       .single();
-    
+
     if (error || !room) {
       return res.status(404).json({ error: 'Room not found' });
     }
-    
-    const disconnectedPlayers = room.disconnected_players || [];
-    const shouldBotPlay = isBot(userId) || disconnectedPlayers.includes(userId);
-    
-    res.json({ 
-      shouldBotPlay,
-      isBot: isBot(userId),
-      isDisconnected: disconnectedPlayers.includes(userId),
+
+    const allPlayers = [...room.team_a, ...room.team_b];
+    const botsInRoom = allPlayers.filter(id => isBot(id));
+
+    res.json({
+      roomId,
+      botsInRoom,
+      botCount: botsInRoom.length,
+      activeBotPlayers: activeBotCount,
+      botProfiles: botsInRoom.map(id => ({
+        id,
+        ...getBotProfile(id),
+        color: room.players[id] || null,
+      })),
     });
   } catch (error) {
-    console.error(`❌ [TEAMUP BOTS] Error checking bot status:`, error);
+    console.error(`❌ [TEAMUP BOTS] Error getting status:`, error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -310,20 +250,35 @@ router.get('/:roomId/should-play/:userId', async (req, res) => {
  */
 router.get('/info', async (req, res) => {
   try {
-    // Get bot profiles from database
-    const { data: bots, error } = await supabaseAdmin
-      .from('users')
-      .select('uid, username, profile_photo')
-      .in('uid', FIXED_BOT_IDS);
-    
-    if (error) throw error;
-    
     res.json({
       botIds: FIXED_BOT_IDS,
-      bots: bots || [],
+      botProfiles: BOT_PROFILES,
     });
   } catch (error) {
     console.error(`❌ [TEAMUP BOTS] Error getting bot info:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// CHECK IF USER IS BOT
+// ============================================
+
+/**
+ * GET /teamup-bots/is-bot/:userId
+ * Check if a user ID is a bot
+ */
+router.get('/is-bot/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    res.json({
+      userId,
+      isBot: isBot(userId),
+      profile: isBot(userId) ? getBotProfile(userId) : null,
+    });
+  } catch (error) {
+    console.error(`❌ [TEAMUP BOTS] Error checking bot:`, error);
     res.status(500).json({ error: error.message });
   }
 });
