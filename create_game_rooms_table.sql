@@ -10,13 +10,19 @@ CREATE TABLE game_rooms (
     "green": {"tokenA": 0, "tokenB": 0, "tokenC": 0, "tokenD": 0},
     "yellow": {"tokenA": 0, "tokenB": 0, "tokenC": 0, "tokenD": 0}
   }',
-  no_of_players INTEGER NOT NULL CHECK (no_of_players IN (2, 3, 4)),
+  no_of_players INTEGER NOT NULL CHECK (no_of_players IN (2, 3, 4, 5, 6)),
   board_theme VARCHAR(50) DEFAULT 'classic',
   dice_state VARCHAR(20) DEFAULT 'waiting' CHECK (dice_state IN ('waiting', 'rolling', 'complete')),
   dice_result INTEGER CHECK (dice_result >= 1 AND dice_result <= 6),
+  pending_steps JSONB DEFAULT '{}'::jsonb,
+  consecutive_sixes JSONB DEFAULT '{}'::jsonb,
   game_state VARCHAR(20) DEFAULT 'waiting' CHECK (game_state IN ('waiting', 'playing', 'finished')),
   turn UUID REFERENCES auth.users(id),
   winners UUID[] DEFAULT '{}',
+  escaped_players UUID[] DEFAULT '{}',
+  disconnected_players UUID[] DEFAULT '{}',
+  kicked_players UUID[] DEFAULT '{}',
+  timeout_misses JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

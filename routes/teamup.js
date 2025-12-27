@@ -5,6 +5,141 @@ import { getBoardPosition } from '../utils/gameHelpers.js';
 
 const router = express.Router();
 
+const DISCONNECT_GRACE_MS = 30_000;
+const disconnectRemovalTimers = new Map();
+
+function _clearDisconnectRemovalTimer(roomId, userId) {
+  const key = `${roomId}:${userId}`;
+  const t = disconnectRemovalTimers.get(key);
+  if (t) {
+    clearTimeout(t);
+    disconnectRemovalTimers.delete(key);
+  }
+}
+
+function _areAllTokensFinished(room, userId) {
+  const color = room?.players?.[userId];
+  if (!color) return false;
+  const positions = room?.positions?.[color];
+  if (!positions) return false;
+  return Object.values(positions).every((pos) => pos === 61);
+}
+
+function _isPlayerActiveInRoom(room, userId) {
+  if (!room?.players?.[userId]) return false;
+  const escapedPlayers = room.escaped_players || [];
+  const kickedPlayers = room.kicked_players || [];
+  const winners = room.winners || [];
+
+  if (escapedPlayers.includes(userId)) return false;
+  if (kickedPlayers.includes(userId)) return false;
+  if (winners.includes(userId)) return false;
+  if (_areAllTokensFinished(room, userId)) return false;
+  return true;
+}
+
+function _getNextActiveTeamPlayer(room, currentUserId) {
+  const players = room.players || {};
+  const turnOrder = ['red', 'green', 'blue', 'yellow'];
+  const currentColor = players[currentUserId];
+
+  const startIndex = currentColor ? turnOrder.indexOf(currentColor) : -1;
+  for (let i = 1; i <= turnOrder.length; i++) {
+    const nextIndex = startIndex === -1 ? (i - 1) : (startIndex + i) % turnOrder.length;
+    const nextColor = turnOrder[nextIndex];
+
+    for (const [userId, color] of Object.entries(players)) {
+      if (color === nextColor && _isPlayerActiveInRoom(room, userId)) {
+        return userId;
+      }
+    }
+  }
+
+  return currentUserId;
+}
+
+async function _finalizeDisconnectRemoval(roomId, userId) {
+  _clearDisconnectRemovalTimer(roomId, userId);
+
+  const { data: room, error: fetchError } = await supabaseAdmin
+    .from('team_up_rooms')
+    .select('*')
+    .eq('room_id', roomId)
+    .single();
+
+  if (fetchError || !room) return;
+  if (room.game_state !== 'playing') return;
+
+  const disconnectedPlayers = room.disconnected_players || [];
+  const escapedPlayers = room.escaped_players || [];
+
+  if (!disconnectedPlayers.includes(userId)) return;
+  if (escapedPlayers.includes(userId)) return;
+  if (!room.players?.[userId]) return;
+
+  const playerColor = room.players[userId];
+
+  let updatedEscaped = [...escapedPlayers];
+  if (!updatedEscaped.includes(userId)) updatedEscaped.push(userId);
+
+  let updatedDisconnected = [...disconnectedPlayers].filter((id) => id !== userId);
+
+  let updatedPositions = { ...room.positions };
+  if (updatedPositions[playerColor]) {
+    updatedPositions[playerColor] = { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 };
+  }
+
+  let updatedPendingSteps = { ...(room.pending_steps || {}) };
+  delete updatedPendingSteps[userId];
+
+  let nextTurn = room.turn;
+  let diceState = room.dice_state;
+  let diceResult = room.dice_result;
+
+  const roomForTurn = {
+    ...room,
+    escaped_players: updatedEscaped,
+    positions: updatedPositions,
+    pending_steps: updatedPendingSteps,
+  };
+
+  if (!nextTurn || !_isPlayerActiveInRoom(roomForTurn, nextTurn)) {
+    nextTurn = _getNextActiveTeamPlayer(roomForTurn, nextTurn || userId);
+    diceState = 'waiting';
+    diceResult = null;
+  }
+
+  const teamAActive = (room.team_a || []).filter((id) => !updatedEscaped.includes(id));
+  const teamBActive = (room.team_b || []).filter((id) => !updatedEscaped.includes(id));
+
+  let gameState = room.game_state;
+  let winners = room.winners || [];
+
+  if (teamAActive.length === 0 && teamBActive.length > 0) {
+    gameState = 'finished';
+    winners = teamBActive;
+  } else if (teamBActive.length === 0 && teamAActive.length > 0) {
+    gameState = 'finished';
+    winners = teamAActive;
+  }
+
+  await supabaseAdmin
+    .from('team_up_rooms')
+    .update({
+      escaped_players: updatedEscaped,
+      disconnected_players: updatedDisconnected,
+      positions: updatedPositions,
+      pending_steps: updatedPendingSteps,
+      turn: nextTurn,
+      dice_state: diceState,
+      dice_result: diceResult,
+      game_state: gameState,
+      winners: winners,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('room_id', roomId);
+}
+
 // Helper: Get next turn in anticlockwise order (red -> green -> blue -> yellow)
 function getNextTeamTurn(players, currentUserId) {
   const turnOrder = ['red', 'green', 'blue', 'yellow'];
@@ -164,7 +299,7 @@ router.post('/:roomId/complete-dice', authenticateUser, async (req, res) => {
 
     if (!validMove) {
       // No valid moves - pass turn
-      const nextTurn = getNextTeamTurn(room.players, userId);
+      const nextTurn = _getNextActiveTeamPlayer(room, userId);
       const consecutiveSixes = room.consecutive_sixes || {};
       if (diceResult !== 6) consecutiveSixes[userId] = 0;
 
@@ -218,7 +353,7 @@ router.post('/:roomId/complete-dice', authenticateUser, async (req, res) => {
 router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
   try {
     const { roomId } = req.params;
-    const { tokenId } = req.body;
+    const { tokenId, newPosition: clientNewPosition } = req.body;
     const userId = req.user.id;
 
     console.log(`🚀 [TEAM UP BACKEND] Move token - Room: ${roomId}, User: ${userId}, Token: ${tokenId}`);
@@ -247,14 +382,9 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'Game is not in playing state' });
     }
 
-    // Check pending steps
+    // Check pending steps (client-first safe: may race with complete-dice)
     const pendingSteps = room.pending_steps || {};
-    const stepsToMove = pendingSteps[userId];
-    
-    if (!stepsToMove || stepsToMove <= 0) {
-      console.log(`❌ [TEAM UP BACKEND] No pending steps for user ${userId}`);
-      return res.status(400).json({ error: 'No pending steps to move' });
-    }
+    let stepsToMove = pendingSteps[userId];
 
     // Parse token (format: "color:tokenName")
     const [color, tokenName] = tokenId.split(':');
@@ -278,6 +408,24 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'Invalid token' });
     }
 
+    // CLIENT-FIRST SUPPORT: if pending_steps not written yet, derive from clientNewPosition or dice_result
+    if ((!stepsToMove || stepsToMove <= 0) && typeof clientNewPosition === 'number') {
+      if (currentPos === 0 && clientNewPosition === 1) {
+        stepsToMove = 6;
+      } else {
+        stepsToMove = clientNewPosition - currentPos;
+      }
+    }
+
+    if ((!stepsToMove || stepsToMove <= 0) && (room.dice_result || 0) > 0) {
+      stepsToMove = room.dice_result;
+    }
+
+    if (!stepsToMove || stepsToMove <= 0) {
+      console.log(`❌ [TEAM UP BACKEND] No pending steps for user ${userId}`);
+      return res.status(400).json({ error: 'No pending steps to move' });
+    }
+
     // Check if can move from home
     if (currentPos === 0 && stepsToMove !== 6) {
       return res.status(400).json({ error: 'Must roll 6 to move token out of home' });
@@ -285,6 +433,12 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     
     // Calculate new position
     let newPos = currentPos === 0 ? 1 : currentPos + stepsToMove;
+
+    if (typeof clientNewPosition === 'number') {
+      if (clientNewPosition === newPos) {
+        newPos = clientNewPosition;
+      }
+    }
     
     // Check if exceeds home position (61 for 4-player)
     if (newPos > 61) {
@@ -350,20 +504,31 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
       console.log(`🏠 [TEAM UP] Token reached finish! Player gets bonus turn.`);
     }
 
+    let winners = [...(room.winners || [])];
+    const allTokensFinished = Object.values(updatedPositions[color] || {}).every(pos => pos === 61);
+    if (allTokensFinished && !winners.includes(userId)) {
+      winners.push(userId);
+    }
+
     // Determine next turn
     let nextTurn = userId;
-    // Player keeps turn if: rolled 6, killed opponent, OR token reached finish
-    const shouldGetAnotherTurn = stepsToMove === 6 || bonusRoll || tokenReachedFinish;
-    
+    let shouldGetAnotherTurn = stepsToMove === 6 || bonusRoll || tokenReachedFinish;
+    if (allTokensFinished) {
+      shouldGetAnotherTurn = false;
+    }
     if (!shouldGetAnotherTurn) {
-      // Get next player in turn order
-      const playerIds = Object.keys(room.players);
-      const currentIndex = playerIds.indexOf(userId);
-      const nextIndex = (currentIndex + 1) % playerIds.length;
-      nextTurn = playerIds[nextIndex];
+      const roomForTurn = {
+        ...room,
+        winners,
+        positions: updatedPositions,
+        pending_steps: updatedPendingSteps,
+      };
+      nextTurn = _getNextActiveTeamPlayer(roomForTurn, userId);
     }
 
     console.log(`🔄 [TEAM UP BACKEND] Next turn: ${nextTurn} (steps: ${stepsToMove}, kills: ${killedTokens.length})`);
+
+    const gameFinished = winners.length >= Object.keys(room.players || {}).length - 1;
 
     // Update room
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
@@ -374,6 +539,8 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
         turn: nextTurn,
         dice_result: null,
         dice_state: 'waiting',
+        winners: winners,
+        game_state: gameFinished ? 'finished' : 'playing',
         updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)
@@ -399,227 +566,33 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
   }
 });
 
-// Bot AI - Handle bot turn
+// ⚠️ DISABLED: Bot AI is now handled by botPlayerService.js
+// This duplicate handler was causing flickering and double animations
+// DO NOT RE-ENABLE - use botPlayerService.js instead
+/*
 async function handleBotTurn(roomId, botUserId) {
-  console.log(`🤖 [BOT AI] Handling bot turn for ${botUserId} in room ${roomId}`);
-  
-  try {
-    // Get room
-    const { data: room } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-
-    if (!room || room.turn !== botUserId || room.dice_state !== 'waiting') {
-      console.log(`❌ [BOT AI] Not bot's turn or dice not waiting. Turn: ${room?.turn}, State: ${room?.dice_state}`);
-      return;
-    }
-
-    // Wait a bit for realism
-    await new Promise(resolve => setTimeout(resolve, 1500));
-
-    // Roll dice
-    const diceResult = Math.floor(Math.random() * 6) + 1;
-    console.log(`🎲 [BOT AI] Bot rolled: ${diceResult}`);
-
-    await supabaseAdmin
-      .from('team_up_rooms')
-      .update({
-        dice_result: diceResult,
-        dice_state: 'rolling',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('room_id', roomId);
-
-    // Wait for dice animation
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Get updated room
-    const { data: updatedRoom } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-
-    if (!updatedRoom) return;
-
-    const botColor = updatedRoom.players[botUserId];
-    const botPositions = updatedRoom.positions[botColor] || {};
-
-    // Check for valid moves
-    const validMoves = [];
-    for (const [tokenName, pos] of Object.entries(botPositions)) {
-      if (pos === 0 && diceResult === 6) {
-        validMoves.push({ tokenName, from: 0, to: 1, priority: 10 });
-      } else if (pos > 0 && pos < 61) {
-        const newPos = pos + diceResult;
-        if (newPos <= 61) {
-          // Higher priority for tokens closer to finish
-          const priority = pos > 50 ? 8 : pos > 30 ? 5 : 3;
-          validMoves.push({ tokenName, from: pos, to: newPos, priority });
-        }
-      }
-    }
-
-    if (validMoves.length === 0) {
-      // No valid moves - pass turn
-      console.log(`⏭️ [BOT AI] No valid moves, passing turn`);
-      const nextTurn = getNextTeamTurn(updatedRoom.players, botUserId);
-      
-      await supabaseAdmin
-        .from('team_up_rooms')
-        .update({
-          turn: nextTurn,
-          dice_result: null,
-          dice_state: 'waiting',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('room_id', roomId);
-      
-      console.log(`✅ [BOT AI] Turn passed to ${nextTurn}`);
-      return;
-    }
-
-    // Sort by priority and pick best move
-    validMoves.sort((a, b) => b.priority - a.priority);
-    const bestMove = validMoves[0];
-
-    console.log(`🎯 [BOT AI] Bot moving ${botColor} ${bestMove.tokenName} from ${bestMove.from} to ${bestMove.to}`);
-
-    // Set pending steps (complete dice)
-    const pendingSteps = { ...updatedRoom.pending_steps };
-    pendingSteps[botUserId] = diceResult;
-
-    await supabaseAdmin
-      .from('team_up_rooms')
-      .update({
-        dice_state: 'complete',
-        pending_steps: pendingSteps,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('room_id', roomId);
-
-    // Wait a bit before moving
-    await new Promise(resolve => setTimeout(resolve, 800));
-
-    // Move token
-    const positions = { ...updatedRoom.positions };
-    if (!positions[botColor]) positions[botColor] = {};
-    positions[botColor] = { ...positions[botColor], [bestMove.tokenName]: bestMove.to };
-
-    // Check for kills using grid coordinates (opponent team only)
-    const killedTokens = [];
-    let bonusRoll = false;
-    const noOfPlayers = 4;
-    
-    // Get grid position of moving token
-    const movingTokenGridPos = getBoardPosition(botColor, bestMove.to, noOfPlayers);
-    
-    // CORRECT safe positions for 4-player board
-    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
-    const isOnSafeSpot = safePositions.includes(bestMove.to);
-    
-    if (!isOnSafeSpot && bestMove.to > 0 && bestMove.to < 61 && movingTokenGridPos) {
-      for (const [otherColor, otherTokens] of Object.entries(positions)) {
-        if (otherColor === botColor) continue;
-        
-        // Check if same team (Team A: red+blue, Team B: green+yellow)
-        const isTeamA = ['red', 'blue'].includes(botColor);
-        const otherIsTeamA = ['red', 'blue'].includes(otherColor);
-        if (isTeamA === otherIsTeamA) continue; // Skip teammate
-        
-        for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
-          if (otherPos <= 0 || otherPos >= 61) continue; // Skip home and finish
-          
-          // Get grid position of opponent token
-          const opponentGridPos = getBoardPosition(otherColor, otherPos, noOfPlayers);
-          
-          // Compare grid coordinates
-          if (opponentGridPos && movingTokenGridPos.pos[0] === opponentGridPos.pos[0] && 
-              movingTokenGridPos.pos[1] === opponentGridPos.pos[1]) {
-            // Kill opponent token
-            positions[otherColor] = { ...positions[otherColor], [otherTokenName]: 0 };
-            killedTokens.push(`${otherColor}:${otherTokenName}`);
-            bonusRoll = true;
-            console.log(`💀 [BOT AI] ${botColor} ${bestMove.tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${otherColor} ${otherTokenName} (grid: [${opponentGridPos.pos}])`);
-          }
-        }
-      }
-    }
-
-    // Determine next turn
-    let nextTurn = botUserId;
-    const shouldGetAnotherTurn = diceResult === 6 || bonusRoll;
-    
-    if (!shouldGetAnotherTurn) {
-      nextTurn = getNextTeamTurn(updatedRoom.players, botUserId);
-    }
-
-    console.log(`🔄 [BOT AI] Next turn: ${nextTurn} (dice: ${diceResult}, kills: ${killedTokens.length})`);
-
-    // Clear pending steps
-    const clearedPendingSteps = { ...pendingSteps };
-    delete clearedPendingSteps[botUserId];
-
-    await supabaseAdmin
-      .from('team_up_rooms')
-      .update({
-        positions,
-        pending_steps: clearedPendingSteps,
-        turn: nextTurn,
-        dice_result: null,
-        dice_state: 'waiting',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('room_id', roomId);
-
-    console.log(`✅ [BOT AI] Bot turn complete. Next turn: ${nextTurn}`);
-  } catch (error) {
-    console.log(`❌ [BOT AI] Error: ${error.message}`);
-  }
+  // DISABLED - see botPlayerService.js
 }
+*/
 
-// Trigger bot turn (called by frontend or realtime trigger)
+// Trigger bot turn - DISABLED (bots auto-trigger via botPlayerService.js)
 router.post('/:roomId/trigger-bot', async (req, res) => {
-  try {
-    const { roomId } = req.params;
-    
-    const { data: room } = await supabaseAdmin
-      .from('team_up_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-
-    if (!room) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-
-    const currentPlayer = room.turn;
-    
-    // Check if current player is a bot
-    const { data: userData } = await supabaseAdmin
-      .from('users')
-      .select('is_bot')
-      .eq('uid', currentPlayer)
-      .single();
-
-    if (userData && userData.is_bot) {
-      // Handle bot turn asynchronously
-      handleBotTurn(roomId, currentPlayer);
-      res.json({ success: true, message: 'Bot turn triggered' });
-    } else {
-      res.json({ success: true, message: 'Not a bot turn' });
-    }
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  // Bot turns are now handled automatically by botPlayerService.js
+  // This endpoint is kept for backwards compatibility but does nothing
+  res.json({ 
+    success: true, 
+    message: 'Bot turns are now handled automatically by botPlayerService.js',
+    deprecated: true 
+  });
 });
 
 // ============================================
 // BOT ENDPOINTS (No auth required - bot sends its own ID)
 // ============================================
 
+// ❌ DISABLED: Bot routes cause conflicts with realtime bot system
+// These routes are disabled to prevent multiple bot systems from interfering
+/*
 // Bot Roll Dice (Optimized - No database queries needed!)
 router.post('/:roomId/bot-roll-dice', async (req, res) => {
   const requestStartTime = Date.now();
@@ -824,7 +797,8 @@ router.post('/:roomId/bot-roll-dice', async (req, res) => {
   }
 });
 
-// Bot Complete Dice
+// ❌ DISABLED: Bot Complete Dice route
+/*
 router.post('/:roomId/bot-complete-dice', async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -906,8 +880,10 @@ router.post('/:roomId/bot-complete-dice', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+*/
 
-// Bot Move Token
+// ❌ DISABLED: Bot Move Token route
+/*
 router.post('/:roomId/bot-move-token', async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -1061,6 +1037,7 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+*/
 
 // ============================================
 // PLAYER LEAVE/DISCONNECT HANDLING
@@ -1272,14 +1249,32 @@ router.post('/:roomId/leave-game', authenticateUser, async (req, res) => {
 
     // Pass turn if it was this player's turn
     let nextTurn = room.turn;
-    if (room.turn === userId) {
-      nextTurn = getNextActivePlayer(room.players, escapedPlayers, userId);
-      console.log(`🔄 [LEAVE] Passing turn from ${userId} to ${nextTurn}`);
-    }
-
+    let diceState = room.dice_state;
+    let diceResult = room.dice_result;
+    
     // Clear pending steps for leaving player
     let updatedPendingSteps = { ...room.pending_steps };
     delete updatedPendingSteps[userId];
+
+    const roomForTurn = {
+      ...room,
+      escaped_players: escapedPlayers,
+      positions: updatedPositions,
+      pending_steps: updatedPendingSteps,
+    };
+
+    if (room.turn === userId) {
+      nextTurn = _getNextActiveTeamPlayer(roomForTurn, userId);
+      // Reset dice state when passing turn due to leave
+      diceState = 'waiting';
+      diceResult = null;
+      console.log(`🔄 [LEAVE] Passing turn from ${userId} to ${nextTurn}, resetting dice state`);
+    } else if (nextTurn && !_isPlayerActiveInRoom(roomForTurn, nextTurn)) {
+      nextTurn = _getNextActiveTeamPlayer(roomForTurn, nextTurn);
+      diceState = 'waiting';
+      diceResult = null;
+      console.log(`🔄 [LEAVE] Current turn became inactive, passing turn to ${nextTurn}`);
+    }
 
     // Check if game should end (only one team left)
     const teamAActive = (room.team_a || []).filter(id => !escapedPlayers.includes(id));
@@ -1307,8 +1302,8 @@ router.post('/:roomId/leave-game', authenticateUser, async (req, res) => {
         escaped_players: escapedPlayers,
         positions: updatedPositions,
         turn: nextTurn,
-        dice_state: 'waiting',
-        dice_result: null,
+        dice_state: diceState,
+        dice_result: diceResult,
         pending_steps: updatedPendingSteps,
         game_state: gameState,
         winners: winners,
@@ -1361,23 +1356,9 @@ router.post('/:roomId/player-disconnect', authenticateUser, async (req, res) => 
       disconnectedPlayers.push(userId);
     }
 
-    // Check if all remaining active players are bots after this disconnect
-    const allPlayerIds = Object.keys(room.players);
-    const escapedPlayers = room.escaped_players || [];
-    const activePlayerIds = allPlayerIds.filter(id => 
-      !escapedPlayers.includes(id) && !disconnectedPlayers.includes(id)
-    );
+    _clearDisconnectRemovalTimer(roomId, userId);
 
-    // If all remaining active players are bots, delete the room
-    const allRemainingAreBots = activePlayerIds.every(id => isBot(id));
-    
-    if (allRemainingAreBots) {
-      console.log(`🗑️ [DISCONNECT] All remaining players are bots after ${userId} disconnect, deleting room`);
-      await supabaseAdmin.from('team_up_rooms').delete().eq('room_id', roomId);
-      return res.json({ success: true, roomDeleted: true, reason: 'all_remaining_are_bots' });
-    }
-
-    // Update room with disconnected player
+    // Update room with disconnected player (bot will take over their turns)
     await supabaseAdmin
       .from('team_up_rooms')
       .update({
@@ -1385,6 +1366,16 @@ router.post('/:roomId/player-disconnect', authenticateUser, async (req, res) => 
         updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId);
+
+    const timerKey = `${roomId}:${userId}`;
+    disconnectRemovalTimers.set(
+      timerKey,
+      setTimeout(() => {
+        _finalizeDisconnectRemoval(roomId, userId).catch((e) => {
+          console.error('Error finalizing disconnect removal:', e);
+        });
+      }, DISCONNECT_GRACE_MS),
+    );
 
     console.log(`✅ [DISCONNECT] Player ${userId} marked as disconnected, bot will take over`);
     res.json({ success: true, botTakeover: true });
@@ -1425,6 +1416,8 @@ router.post('/:roomId/player-reconnect', authenticateUser, async (req, res) => {
     // Remove from disconnected players
     let disconnectedPlayers = [...(room.disconnected_players || [])].filter(id => id !== userId);
 
+    _clearDisconnectRemovalTimer(roomId, userId);
+
     // Update room
     await supabaseAdmin
       .from('team_up_rooms')
@@ -1438,6 +1431,91 @@ router.post('/:roomId/player-reconnect', authenticateUser, async (req, res) => {
     res.json({ success: true, room });
   } catch (error) {
     console.error('Error handling reconnect:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Turn timeout (client-side timer expired)
+router.post('/:roomId/turn-timeout', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    if (room.game_state !== 'playing') {
+      return res.status(400).json({ error: 'Game is not in playing state' });
+    }
+
+    if (room.turn !== userId) {
+      return res.status(400).json({ error: 'Not your turn' });
+    }
+
+    // Disconnected players are bot-controlled; do not penalize with timeout misses.
+    if ((room.disconnected_players || []).includes(userId)) {
+      return res.json({ success: true, room, ignored: true, reason: 'disconnected_bot_takeover' });
+    }
+
+    const timeoutMisses = { ...(room.timeout_misses || {}) };
+    const currentMisses = Number(timeoutMisses[userId] || 0);
+    const nextMisses = currentMisses + 1;
+    timeoutMisses[userId] = nextMisses;
+
+    const kickedPlayers = [...(room.kicked_players || [])];
+    const escapedPlayers = [...(room.escaped_players || [])];
+
+    const shouldKick = nextMisses >= 6;
+    if (shouldKick) {
+      if (!kickedPlayers.includes(userId)) kickedPlayers.push(userId);
+      if (!escapedPlayers.includes(userId)) escapedPlayers.push(userId);
+    }
+
+    const updatedPendingSteps = { ...(room.pending_steps || {}) };
+    delete updatedPendingSteps[userId];
+
+    const roomForTurn = {
+      ...room,
+      escaped_players: escapedPlayers,
+      kicked_players: kickedPlayers,
+      pending_steps: updatedPendingSteps,
+      timeout_misses: timeoutMisses,
+    };
+
+    const nextTurn = _getNextActiveTeamPlayer(roomForTurn, userId);
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        timeout_misses: timeoutMisses,
+        kicked_players: kickedPlayers,
+        escaped_players: escapedPlayers,
+        pending_steps: updatedPendingSteps,
+        turn: nextTurn,
+        dice_state: 'waiting',
+        dice_result: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    res.json({
+      success: true,
+      room: updatedRoom,
+      kicked: shouldKick,
+      timeoutMisses: nextMisses,
+    });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -1463,6 +1541,55 @@ router.get('/:roomId/should-bot-play/:userId', async (req, res) => {
     res.json({ shouldBotPlay, isDisconnected: disconnectedPlayers.includes(userId) });
   } catch (error) {
     console.error('Error checking bot play:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:roomId/exit', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    if (!room.players?.[userId]) {
+      return res.status(400).json({ error: 'Player not in this room' });
+    }
+
+    const exitedPlayers = [...(room.exited_players || [])];
+    if (!exitedPlayers.includes(userId)) exitedPlayers.push(userId);
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        exited_players: exitedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+    const expectedHumanIds = Object.keys(room.players || {}).filter((id) => !isBotId(id));
+    const allHumansExited = expectedHumanIds.every((id) => exitedPlayers.includes(id));
+
+    if (updatedRoom.game_state === 'finished' && allHumansExited) {
+      await supabaseAdmin.from('team_up_rooms').delete().eq('room_id', roomId);
+      return res.json({ success: true, roomDeleted: true });
+    }
+
+    return res.json({ success: true, room: updatedRoom });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });

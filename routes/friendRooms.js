@@ -1,7 +1,7 @@
 import express from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticateUser } from '../middleware/auth.js';
-import { assignColor, initializePositions } from '../utils/gameHelpers.js';
+import { assignColor, initializePositions, getNextTurn } from '../utils/gameHelpers.js';
 
 const router = express.Router();
 
@@ -19,7 +19,7 @@ function generateRoomCode() {
 router.post('/create', authenticateUser, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { noOfPlayers, dare } = req.body;
+    const { noOfPlayers, dare, entryFee } = req.body;
 
     if (!noOfPlayers || noOfPlayers < 2 || noOfPlayers > 6) {
       return res.status(400).json({ error: 'Invalid number of players (must be 2-6)' });
@@ -53,6 +53,7 @@ router.post('/create', authenticateUser, async (req, res) => {
         positions: positions,
         no_of_players: noOfPlayers,
         board_theme: 'classic',
+        entry_fee: Number(entryFee ?? 0),
         game_state: 'waiting',
         dice_state: 'waiting',
         pending_steps: {},
@@ -113,7 +114,10 @@ router.post('/:roomCode/join', authenticateUser, async (req, res) => {
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('friend_rooms')
-      .update({ players: updatedPlayers, positions: updatedPositions })
+      .update({
+        players: updatedPlayers,
+        positions: updatedPositions,
+      })
       .eq('room_id', roomCode)
       .select()
       .single();
@@ -149,6 +153,56 @@ router.get('/:roomCode', authenticateUser, async (req, res) => {
   }
 });
 
+router.post('/:roomCode/exit', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { roomCode } = req.params;
+
+    const { data: friendRoom, error: fetchError } = await supabaseAdmin
+      .from('friend_rooms')
+      .select('*')
+      .eq('room_id', roomCode)
+      .single();
+
+    if (fetchError || !friendRoom) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const players = friendRoom.players || {};
+    if (!players[userId]) {
+      return res.status(400).json({ error: 'Player not in room' });
+    }
+
+    const exitedPlayers = [...(friendRoom.exited_players || [])];
+    if (!exitedPlayers.includes(userId)) exitedPlayers.push(userId);
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from('friend_rooms')
+      .update({
+        exited_players: exitedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomCode)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+    const expectedHumanIds = Object.keys(players).filter((id) => !isBotId(id));
+    const allHumansExited = expectedHumanIds.every((id) => exitedPlayers.includes(id));
+
+    if (updatedRoom.game_state === 'finished' && allHumansExited) {
+      await supabaseAdmin.from('friend_rooms').delete().eq('room_id', roomCode);
+      return res.json({ success: true, roomDeleted: true });
+    }
+
+    return res.json({ success: true, friendRoom: updatedRoom });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Leave friend room
 router.post('/:roomCode/leave', authenticateUser, async (req, res) => {
   try {
@@ -163,6 +217,66 @@ router.post('/:roomCode/leave', authenticateUser, async (req, res) => {
 
     if (fetchError || !friendRoom) {
       return res.status(404).json({ error: 'Room not found' });
+    }
+
+    // If game is in progress, treat leave as ESCAPE (do not remove from players)
+    if (friendRoom.game_state === 'playing') {
+      const players = friendRoom.players || {};
+      const playerColor = players[userId];
+
+      if (!playerColor) {
+        return res.json({ success: true, friendRoom });
+      }
+
+      const escapedPlayers = [...(friendRoom.escaped_players || [])];
+      if (!escapedPlayers.includes(userId)) {
+        escapedPlayers.push(userId);
+      }
+
+      const updatedPendingSteps = { ...(friendRoom.pending_steps || {}) };
+      delete updatedPendingSteps[userId];
+
+      const updatedPositions = { ...(friendRoom.positions || {}) };
+      if (updatedPositions[playerColor]) {
+        updatedPositions[playerColor] = { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 };
+      }
+
+      let nextTurn = friendRoom.turn;
+      let diceState = friendRoom.dice_state;
+      let diceResult = friendRoom.dice_result;
+
+      const roomForTurn = {
+        ...friendRoom,
+        escaped_players: escapedPlayers,
+        pending_steps: updatedPendingSteps,
+        positions: updatedPositions,
+      };
+
+      if (friendRoom.turn === userId) {
+        const playerIds = Object.keys(players);
+        nextTurn = getNextTurn(playerIds, userId, players, roomForTurn);
+        diceState = 'waiting';
+        diceResult = null;
+      }
+
+      const { data: updatedRoom, error: updateError } = await supabaseAdmin
+        .from('friend_rooms')
+        .update({
+          escaped_players: escapedPlayers,
+          pending_steps: updatedPendingSteps,
+          positions: updatedPositions,
+          turn: nextTurn,
+          dice_state: diceState,
+          dice_result: diceResult,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('room_id', roomCode)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
+
+      return res.json({ success: true, friendRoom: updatedRoom, escaped: true });
     }
 
     if (friendRoom.host_id === userId) {
@@ -183,9 +297,34 @@ router.post('/:roomCode/leave', authenticateUser, async (req, res) => {
     const updatedPositions = { ...friendRoom.positions };
     delete updatedPositions[playerColor];
 
+    const updatedPendingSteps = { ...(friendRoom.pending_steps || {}) };
+    delete updatedPendingSteps[userId];
+
+    let nextTurn = friendRoom.turn;
+    let diceState = friendRoom.dice_state;
+    let diceResult = friendRoom.dice_result;
+
+    if (friendRoom.game_state === 'playing' && friendRoom.turn === userId) {
+      const remainingIds = Object.keys(updatedPlayers);
+      const tempPlayers = { ...updatedPlayers, [userId]: playerColor };
+      const tempIds = Object.keys(tempPlayers);
+      nextTurn = remainingIds.length > 0
+        ? getNextTurn(tempIds, userId, tempPlayers, friendRoom)
+        : null;
+      diceState = 'waiting';
+      diceResult = null;
+    }
+
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('friend_rooms')
-      .update({ players: updatedPlayers, positions: updatedPositions })
+      .update({
+        players: updatedPlayers,
+        positions: updatedPositions,
+        pending_steps: updatedPendingSteps,
+        turn: nextTurn,
+        dice_state: diceState,
+        dice_result: diceResult,
+      })
       .eq('room_id', roomCode)
       .select()
       .single();
@@ -289,7 +428,7 @@ router.post('/:roomCode/mic-state', authenticateUser, async (req, res) => {
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('friend_rooms')
-      .update({ mic_state: updatedMicState })
+      .update({ mic_state: updatedMicState, updated_at: new Date().toISOString() })
       .eq('room_id', roomCode)
       .select()
       .single();

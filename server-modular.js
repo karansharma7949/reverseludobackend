@@ -11,6 +11,9 @@ import teamupRouter from './routes/teamup.js';
 import chatRouter from './routes/chat.js';
 import teamupBotsRouter from './routes/teamupBots.js';
 
+// Bot players service (autonomous realtime bots)
+import { startBotPlayersForGameRoom } from './services/botPlayerService.js';
+
 // Import config
 import { supabaseAdmin } from './config/supabase.js';
 
@@ -73,7 +76,7 @@ app.use('/api/chat', chatRouter);
 // Quick match
 app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
   try {
-    const { noOfPlayers, boardTheme } = req.body;
+    const { noOfPlayers, boardTheme, entryFee } = req.body;
     const userId = req.user.id;
 
     console.log(`🎯 QUICK MATCH REQUEST:`);
@@ -85,11 +88,14 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
       return res.status(400).json({ error: 'Number of players must be 2, 3, 4, 5, or 6' });
     }
 
+    const desiredEntryFee = Number(entryFee ?? 0);
+
     const { data: availableRooms, error: searchError } = await supabaseAdmin
       .from('game_rooms')
       .select('*')
       .eq('game_state', 'waiting')
       .eq('no_of_players', noOfPlayers)
+      .eq('entry_fee', desiredEntryFee)
       .order('created_at', { ascending: true });
 
     if (searchError) throw searchError;
@@ -189,6 +195,7 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
         positions: positions,
         no_of_players: noOfPlayers,
         board_theme: boardTheme || 'classic',
+        entry_fee: desiredEntryFee,
         dice_state: 'waiting',
         dice_result: null,
         game_state: 'waiting',
@@ -208,10 +215,56 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
   }
 });
 
+app.post('/api/game-rooms/:roomId/exit', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { gameRoom, tableName } = await findGameRoom(roomId);
+    if (!gameRoom || !tableName) {
+      return res.status(404).json({ error: 'Game room not found' });
+    }
+
+    const players = gameRoom.players || {};
+    if (!players[userId]) {
+      return res.status(400).json({ error: 'Player not in room' });
+    }
+
+    const exitedPlayers = [...(gameRoom.exited_players || [])];
+    if (!exitedPlayers.includes(userId)) exitedPlayers.push(userId);
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from(tableName)
+      .update({
+        exited_players: exitedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+    const allPlayerIds = Object.keys(players);
+    const expectedHumanIds = allPlayerIds.filter((id) => !isBotId(id));
+    const allHumansExited = expectedHumanIds.every((id) => exitedPlayers.includes(id));
+
+    if (updatedRoom.game_state === 'finished' && allHumansExited) {
+      await supabaseAdmin.from(tableName).delete().eq('room_id', roomId);
+      return res.json({ success: true, roomDeleted: true });
+    }
+
+    return res.json({ success: true, gameRoom: updatedRoom });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create game room
 app.post('/api/game-rooms/create', authenticateUser, async (req, res) => {
   try {
-    const { noOfPlayers, boardTheme } = req.body;
+    const { noOfPlayers, boardTheme, entryFee } = req.body;
     const hostId = req.user.id;
 
     if (![2, 3, 4, 5, 6].includes(noOfPlayers)) {
@@ -242,6 +295,8 @@ app.post('/api/game-rooms/create', authenticateUser, async (req, res) => {
     const players = { [hostId]: hostColor };
     const positions = initializePositions(players);
 
+    const desiredEntryFee = Number(entryFee ?? 0);
+
     const { data: gameRoom, error } = await supabaseAdmin
       .from('game_rooms')
       .insert({
@@ -251,6 +306,7 @@ app.post('/api/game-rooms/create', authenticateUser, async (req, res) => {
         positions: positions,
         no_of_players: noOfPlayers,
         board_theme: boardTheme || 'classic',
+        entry_fee: desiredEntryFee,
         dice_state: 'waiting',
         dice_result: null,
         game_state: 'waiting',
@@ -431,7 +487,9 @@ app.post('/api/game-rooms/:roomId/join', authenticateUser, async (req, res) => {
       
       // Get first player to assign initial turn - prefer real players over bots
       const playerIds = Object.keys(updatedPlayers);
-      const realPlayers = playerIds.filter(id => !id.startsWith('bot_'));
+      const realPlayers = playerIds.filter(
+        id => !id.startsWith('bot_') && !id.startsWith('00000000-'),
+      );
       const firstTurnPlayer = realPlayers.length > 0 ? realPlayers[0] : playerIds[0];
       
       console.log(`   First turn assigned to: ${firstTurnPlayer} (${updatedPlayers[firstTurnPlayer]})`);
@@ -456,6 +514,19 @@ app.post('/api/game-rooms/:roomId/join', authenticateUser, async (req, res) => {
         console.log(`   Game State: ${startedRoom.game_state}`);
         console.log(`   Turn: ${startedRoom.turn}`);
         console.log(`   Dice State: ${startedRoom.dice_state}`);
+
+        // Start autonomous backend bots for this room (they subscribe and play on their own)
+        try {
+          const startedBots = await startBotPlayersForGameRoom(roomId);
+          console.log(
+            `🤖 [AUTO-START] Started ${startedBots.length} autonomous bot players for game room ${roomId}`,
+          );
+        } catch (e) {
+          console.log(
+            `⚠️ [AUTO-START] Failed to start autonomous bots for ${roomId}: ${e?.message ?? e}`,
+          );
+        }
+
         res.json({ success: true, gameRoom: startedRoom, autoStarted: true });
       }
     } else {
@@ -477,14 +548,9 @@ app.post('/api/game-rooms/:roomId/start', authenticateUser, async (req, res) => 
     console.log(`   Room ID: ${roomId}`);
     console.log(`   Host ID: ${userId}`);
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-
-    if (fetchError || !gameRoom) {
-      console.log(`   ❌ Game room not found: ${fetchError?.message}`);
+    const { gameRoom, tableName } = await findGameRoom(roomId);
+    if (!gameRoom || !tableName) {
+      console.log(`   ❌ Game room not found`);
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -504,7 +570,9 @@ app.post('/api/game-rooms/:roomId/start', authenticateUser, async (req, res) => 
     }
 
     // Always give first turn to a real player (not bot)
-    const realPlayers = playerIds.filter(id => !id.startsWith('bot_'));
+    const realPlayers = playerIds.filter(
+      id => !id.startsWith('bot_') && !id.startsWith('00000000-'),
+    );
     const firstTurnPlayer = realPlayers.length > 0 
       ? realPlayers[Math.floor(Math.random() * realPlayers.length)]
       : playerIds[0]; // Fallback to any player if all are bots
@@ -529,6 +597,16 @@ app.post('/api/game-rooms/:roomId/start', authenticateUser, async (req, res) => 
     console.log(`   Game State: ${updatedRoom.game_state}`);
     console.log(`   Turn: ${updatedRoom.turn}`);
     console.log(`   Dice State: ${updatedRoom.dice_state}`);
+
+    // Start autonomous backend bots for this room (they subscribe and play on their own)
+    try {
+      const startedBots = await startBotPlayersForGameRoom(roomId);
+      console.log(
+        `🤖 [START GAME] Started ${startedBots.length} autonomous bot players for game room ${roomId}`,
+      );
+    } catch (e) {
+      console.log(`⚠️ [START GAME] Failed to start autonomous bots for ${roomId}: ${e?.message ?? e}`);
+    }
 
     res.json({ success: true, gameRoom: updatedRoom });
   } catch (error) {
@@ -566,7 +644,9 @@ app.post('/api/game-rooms/:roomId/force-start', authenticateUser, async (req, re
     console.log(`   Player details: ${JSON.stringify(gameRoom.players)}`);
 
     // Always give first turn to a real player (not bot)
-    const realPlayers = playerIds.filter(id => !id.startsWith('bot_'));
+    const realPlayers = playerIds.filter(
+      id => !id.startsWith('bot_') && !id.startsWith('00000000-'),
+    );
     const firstTurnPlayer = realPlayers.length > 0 
       ? realPlayers[Math.floor(Math.random() * realPlayers.length)]
       : playerIds[0];
@@ -585,6 +665,18 @@ app.post('/api/game-rooms/:roomId/force-start', authenticateUser, async (req, re
       .single();
 
     if (updateError) throw updateError;
+
+    // Start autonomous backend bots for this room (they subscribe and play on their own)
+    try {
+      const startedBots = await startBotPlayersForGameRoom(roomId);
+      console.log(
+        `🤖 [FORCE-START] Started ${startedBots.length} autonomous bot players for game room ${roomId}`,
+      );
+    } catch (e) {
+      console.log(
+        `⚠️ [FORCE-START] Failed to start autonomous bots for ${roomId}: ${e?.message ?? e}`,
+      );
+    }
 
     console.log(`✅ GAME ${roomId} FORCE-STARTED SUCCESSFULLY!`);
     console.log(`   🎯 GAME IS NOW ACTIVE! Turn passed to ${gameRoom.players[firstTurnPlayer]} player (${firstTurnPlayer})`);
@@ -622,7 +714,9 @@ app.post('/api/game-rooms/:roomId/fix-turn', authenticateUser, async (req, res) 
     // If game is playing but turn is null, assign turn to red player
     if (gameRoom.game_state === 'playing' && !gameRoom.turn) {
       const playerIds = Object.keys(gameRoom.players);
-      const realPlayers = playerIds.filter(id => !id.startsWith('bot_'));
+      const realPlayers = playerIds.filter(
+        id => !id.startsWith('bot_') && !id.startsWith('00000000-'),
+      );
       const firstTurnPlayer = realPlayers.length > 0 
         ? realPlayers[0] // Give to first real player
         : playerIds[0]; // Fallback to any player
@@ -691,6 +785,7 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
     // Removed 3 consecutive sixes constraint - players can keep rolling
 
     // First update with rolling state for frontend animation
+    // FIX: Only update to 'rolling' if not already rolling (idempotent)
     const { data: rollingRoom, error: rollingError } = await supabaseAdmin
       .from(tableName)
       .update({
@@ -698,10 +793,14 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
         dice_state: 'rolling',
       })
       .eq('room_id', roomId)
+      .neq('dice_state', 'rolling') // Only update if not already rolling
       .select()
       .single();
 
-    if (rollingError) throw rollingError;
+    if (rollingError && rollingError.code !== 'PGRST116') {
+      // PGRST116 = no rows updated (already rolling), which is fine
+      throw rollingError;
+    }
 
     // After a short delay, automatically set to complete state
     // BUT only if the dice is still in 'rolling' state (prevents race condition with move-token)
@@ -771,7 +870,7 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
     const validMove = hasValidMoves(playerPositions, diceResult, noOfPlayers);
 
     if (!validMove) {
-      const nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
+      const nextTurn = getNextTurn(Object.keys(gameRoom.players), userId, gameRoom.players, gameRoom);
 
       const { data: updatedRoom, error: updateError } = await supabaseAdmin
         .from(tableName)
@@ -812,7 +911,7 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
   try {
     const { roomId } = req.params;
     const userId = req.user.id;
-    const { tokenName, color } = req.body;
+    const { tokenName, color, newPosition: clientNewPosition } = req.body;
 
     const { gameRoom, tableName } = await findGameRoom(roomId);
 
@@ -825,11 +924,7 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
     }
 
     const pendingSteps = gameRoom.pending_steps || {};
-    const stepsToMove = pendingSteps[userId];
-    
-    if (!stepsToMove || stepsToMove <= 0) {
-      return res.status(400).json({ error: 'No pending steps to move' });
-    }
+    let stepsToMove = pendingSteps[userId];
 
     if (gameRoom.players[userId] !== color) {
       return res.status(403).json({ error: 'This color does not belong to you' });
@@ -840,6 +935,24 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
       return res.status(400).json({ error: 'Invalid token' });
     }
 
+    // CLIENT-FIRST SUPPORT: If pending_steps has not been written yet (race with complete-dice),
+    // derive the intended steps from the client-provided newPosition or fall back to dice_result.
+    if ((!stepsToMove || stepsToMove <= 0) && typeof clientNewPosition === 'number') {
+      if (currentPosition === 0 && clientNewPosition === 1) {
+        stepsToMove = 6;
+      } else {
+        stepsToMove = clientNewPosition - currentPosition;
+      }
+    }
+
+    if ((!stepsToMove || stepsToMove <= 0) && (gameRoom.dice_result || 0) > 0) {
+      stepsToMove = gameRoom.dice_result;
+    }
+
+    if (!stepsToMove || stepsToMove <= 0) {
+      return res.status(400).json({ error: 'No pending steps to move' });
+    }
+
     if (currentPosition === 0 && stepsToMove !== 6) {
       return res.status(400).json({ error: 'Must roll 6 to move token out of home' });
     }
@@ -848,6 +961,14 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
     const { finalPosition, homePosition } = getBoardConfig(noOfPlayers);
 
     let newPosition = currentPosition === 0 ? 1 : currentPosition + stepsToMove;
+
+    // If client provided a newPosition and it matches the legal computed move, prefer it.
+    // This avoids visual snapback when the server temporarily lags behind client-first UI.
+    if (typeof clientNewPosition === 'number') {
+      if (clientNewPosition === newPosition) {
+        newPosition = clientNewPosition;
+      }
+    }
 
     if (newPosition > homePosition) {
       return res.status(400).json({ error: 'Need exact dice count to enter home' });
@@ -881,7 +1002,7 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
     let nextTurn = userId;
     // Player keeps turn if: rolled 6, killed opponent, OR token reached finish
     if (stepsToMove !== 6 && !bonusRoll && !tokenReachedFinish) {
-      nextTurn = getNextTurn(Object.keys(gameRoom.players), userId);
+      nextTurn = getNextTurn(Object.keys(gameRoom.players), userId, gameRoom.players, gameRoom);
     }
 
     // Turn management - no consecutive sixes constraint
@@ -921,14 +1042,10 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
     console.log(`   Room ID: ${roomId}`);
     console.log(`   Player ID: ${userId}`);
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
+    const { gameRoom, tableName } = await findGameRoom(roomId);
 
-    if (fetchError || !gameRoom) {
-      console.log(`   ❌ Game room not found: ${fetchError?.message}`);
+    if (!gameRoom || !tableName) {
+      console.log(`   ❌ Game room not found`);
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -937,29 +1054,67 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
     console.log(`   Current players: ${JSON.stringify(gameRoom.players)}`);
     console.log(`   Player leaving is host: ${gameRoom.host_id === userId}`);
 
-    if (gameRoom.host_id === userId) {
-      console.log(`   🗑️ Host leaving - deleting entire room`);
-      const { error: deleteError } = await supabaseAdmin
-        .from('game_rooms')
-        .delete()
-        .eq('room_id', roomId);
+    const players = gameRoom.players || {};
+    const playerColor = players[userId];
+    console.log(`   Player was playing as: ${playerColor}`);
 
-      if (deleteError) throw deleteError;
-
-      console.log(`   ✅ Room ${roomId} deleted successfully`);
-      return res.json({ success: true, message: 'Game room deleted' });
+    if (!playerColor) {
+      console.log(`   ⚠️ Player not in room players map, treating as already-left`);
+      return res.json({ success: true, gameRoom });
     }
 
-    const updatedPlayers = { ...gameRoom.players };
-    const playerColor = updatedPlayers[userId];
-    delete updatedPlayers[userId];
-    
-    console.log(`   Player was playing as: ${playerColor}`);
-    console.log(`   Remaining players: ${JSON.stringify(updatedPlayers)}`);
-    
+    const escapedPlayers = [...(gameRoom.escaped_players || [])];
+    if (!escapedPlayers.includes(userId)) {
+      escapedPlayers.push(userId);
+    }
+
+    const updatedPendingSteps = { ...(gameRoom.pending_steps || {}) };
+    delete updatedPendingSteps[userId];
+
+    const updatedPositions = { ...(gameRoom.positions || {}) };
+    if (updatedPositions[playerColor]) {
+      updatedPositions[playerColor] = {
+        tokenA: 0,
+        tokenB: 0,
+        tokenC: 0,
+        tokenD: 0,
+      };
+    }
+
+    let nextTurn = gameRoom.turn;
+    let diceState = gameRoom.dice_state;
+    let diceResult = gameRoom.dice_result;
+
+    const roomForTurn = {
+      ...gameRoom,
+      escaped_players: escapedPlayers,
+      pending_steps: updatedPendingSteps,
+      positions: updatedPositions,
+    };
+
+    if (gameRoom.game_state === 'playing' && gameRoom.turn === userId) {
+      const playerIds = Object.keys(players);
+      nextTurn = getNextTurn(playerIds, userId, players, roomForTurn);
+      diceState = 'waiting';
+      diceResult = null;
+    } else if (nextTurn && (roomForTurn.escaped_players || []).includes(nextTurn)) {
+      const playerIds = Object.keys(players);
+      nextTurn = getNextTurn(playerIds, nextTurn, players, roomForTurn);
+      diceState = 'waiting';
+      diceResult = null;
+    }
+
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
-      .update({ players: updatedPlayers })
+      .from(tableName)
+      .update({
+        escaped_players: escapedPlayers,
+        pending_steps: updatedPendingSteps,
+        positions: updatedPositions,
+        turn: nextTurn,
+        dice_state: diceState,
+        dice_result: diceResult,
+        updated_at: new Date().toISOString(),
+      })
       .eq('room_id', roomId)
       .select()
       .single();
@@ -967,11 +1122,189 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
     if (updateError) throw updateError;
 
     console.log(`   ✅ Player ${userId} left room ${roomId} successfully`);
-    console.log(`   Remaining players count: ${Object.keys(updatedPlayers).length}`);
+    console.log(`   Remaining players count: ${Object.keys(players).length}`);
 
     res.json({ success: true, gameRoom: updatedRoom });
   } catch (error) {
     console.error(`❌ Error leaving game:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Player Disconnect (app background / network lost)
+app.post('/api/game-rooms/:roomId/player-disconnect', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { gameRoom, tableName } = await findGameRoom(roomId);
+    if (!gameRoom || !tableName) {
+      return res.status(404).json({ error: 'Game room not found' });
+    }
+
+    if (tableName !== 'game_rooms' && tableName !== 'tournament_rooms' && tableName !== 'friend_rooms') {
+      return res.status(400).json({ error: 'Disconnect not supported for this room type' });
+    }
+
+    const players = gameRoom.players || {};
+    if (!players[userId]) {
+      return res.status(400).json({ error: 'Player not in room' });
+    }
+
+    const escapedPlayers = gameRoom.escaped_players || [];
+    const kickedPlayers = gameRoom.kicked_players || [];
+    if (escapedPlayers.includes(userId) || kickedPlayers.includes(userId)) {
+      return res.json({ success: true, gameRoom });
+    }
+
+    const disconnectedPlayers = [...(gameRoom.disconnected_players || [])];
+    if (!disconnectedPlayers.includes(userId)) disconnectedPlayers.push(userId);
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from(tableName)
+      .update({
+        disconnected_players: disconnectedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+    res.json({ success: true, gameRoom: updatedRoom });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Player Reconnect (app foreground)
+app.post('/api/game-rooms/:roomId/player-reconnect', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { gameRoom, tableName } = await findGameRoom(roomId);
+    if (!gameRoom || !tableName) {
+      return res.status(404).json({ error: 'Game room not found' });
+    }
+
+    if (tableName !== 'game_rooms' && tableName !== 'tournament_rooms' && tableName !== 'friend_rooms') {
+      return res.status(400).json({ error: 'Reconnect not supported for this room type' });
+    }
+
+    const players = gameRoom.players || {};
+    if (!players[userId]) {
+      return res.status(400).json({ error: 'Player not in room' });
+    }
+
+    const escapedPlayers = gameRoom.escaped_players || [];
+    const kickedPlayers = gameRoom.kicked_players || [];
+    if (escapedPlayers.includes(userId) || kickedPlayers.includes(userId)) {
+      return res.json({ success: true, gameRoom });
+    }
+
+    const disconnectedPlayers = [...(gameRoom.disconnected_players || [])].filter(
+      (id) => id !== userId,
+    );
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from(tableName)
+      .update({
+        disconnected_players: disconnectedPlayers,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+    res.json({ success: true, gameRoom: updatedRoom });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Turn timeout (client-side timer expired)
+app.post('/api/game-rooms/:roomId/turn-timeout', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { gameRoom, tableName } = await findGameRoom(roomId);
+    if (!gameRoom) {
+      return res.status(404).json({ error: 'Game room not found' });
+    }
+
+    if (tableName !== 'game_rooms' && tableName !== 'tournament_rooms' && tableName !== 'friend_rooms') {
+      return res.status(400).json({ error: 'Timeout not supported for this room type' });
+    }
+
+    if (gameRoom.game_state !== 'playing') {
+      return res.status(400).json({ error: 'Game is not in playing state' });
+    }
+
+    if (gameRoom.turn !== userId) {
+      return res.status(400).json({ error: 'Not your turn' });
+    }
+
+    // Disconnected players are bot-controlled; do not penalize with timeout misses.
+    if ((gameRoom.disconnected_players || []).includes(userId)) {
+      return res.json({ success: true, gameRoom, ignored: true, reason: 'disconnected_bot_takeover' });
+    }
+
+    const players = gameRoom.players || {};
+    if (!players[userId]) {
+      return res.status(400).json({ error: 'Player not in room' });
+    }
+
+    const timeoutMisses = { ...(gameRoom.timeout_misses || {}) };
+    const currentMisses = Number(timeoutMisses[userId] || 0);
+    const nextMisses = currentMisses + 1;
+    timeoutMisses[userId] = nextMisses;
+
+    const escapedPlayers = [...(gameRoom.escaped_players || [])];
+    const kickedPlayers = [...(gameRoom.kicked_players || [])];
+
+    const shouldKick = nextMisses >= 6;
+    if (shouldKick) {
+      if (!kickedPlayers.includes(userId)) kickedPlayers.push(userId);
+      if (!escapedPlayers.includes(userId)) escapedPlayers.push(userId);
+    }
+
+    const updatedPendingSteps = { ...(gameRoom.pending_steps || {}) };
+    delete updatedPendingSteps[userId];
+
+    const roomForTurn = {
+      ...gameRoom,
+      escaped_players: escapedPlayers,
+      kicked_players: kickedPlayers,
+      pending_steps: updatedPendingSteps,
+      timeout_misses: timeoutMisses,
+    };
+
+    const playerIds = Object.keys(players);
+    const nextTurn = getNextTurn(playerIds, userId, players, roomForTurn);
+
+    const { data: updatedRoom, error: updateError } = await supabaseAdmin
+      .from(tableName)
+      .update({
+        timeout_misses: timeoutMisses,
+        escaped_players: escapedPlayers,
+        kicked_players: kickedPlayers,
+        turn: nextTurn,
+        dice_state: 'waiting',
+        dice_result: null,
+        pending_steps: updatedPendingSteps,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    res.json({ success: true, gameRoom: updatedRoom, kicked: shouldKick, timeoutMisses: nextMisses });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -1020,7 +1353,7 @@ app.post('/api/game-rooms/:roomId/pass-turn', authenticateUser, async (req, res)
 
     // Get next player
     const playerIds = Object.keys(gameRoom.players);
-    const nextTurn = getNextTurn(playerIds, userId);
+    const nextTurn = getNextTurn(playerIds, userId, gameRoom.players, gameRoom);
 
     console.log(`   Passing turn from ${userId} to ${nextTurn}`);
     console.log(`   Next player color: ${gameRoom.players[nextTurn]}`);

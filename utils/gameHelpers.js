@@ -206,10 +206,107 @@ export function checkAllTokensHome(positions, noOfPlayers) {
 }
 
 // Get next player turn
-export function getNextTurn(playerIds, currentUserId) {
+export function getNextTurn(playerIds, currentUserId, players = null, roomData = null) {
+  // If we have the players object with colors, use proper turn order
+  if (players) {
+    const noOfPlayers = roomData?.no_of_players || playerIds.length;
+    let TURN_ORDER;
+    if (noOfPlayers === 2) {
+      TURN_ORDER = ['blue', 'green'];
+    } else if (noOfPlayers === 3) {
+      TURN_ORDER = ['red', 'yellow', 'green'];
+    } else if (noOfPlayers === 4) {
+      TURN_ORDER = ['red', 'blue', 'yellow', 'green'];
+    } else if (noOfPlayers === 5) {
+      TURN_ORDER = ['red', 'green', 'orange', 'blue', 'yellow'];
+    } else {
+      TURN_ORDER = ['red', 'orange', 'green', 'yellow', 'purple', 'blue'];
+    }
+    const currentColor = players[currentUserId];
+    if (!currentColor) return playerIds[0]; // Fallback
+    
+    const currentIndex = TURN_ORDER.indexOf(currentColor);
+    if (currentIndex === -1) return playerIds[0]; // Fallback
+    
+    // Find next player in turn order
+    for (let i = 1; i <= TURN_ORDER.length; i++) {
+      const nextIndex = (currentIndex + i) % TURN_ORDER.length;
+      const nextColor = TURN_ORDER[nextIndex];
+      
+      // Find player with this color
+      for (const [userId, color] of Object.entries(players)) {
+        if (color === nextColor) {
+          // Check if player is still active (not disconnected and not finished)
+          if (isPlayerActive(userId, color, roomData)) {
+            return userId;
+          }
+        }
+      }
+    }
+    
+    // If no active player found, return current player (shouldn't happen)
+    return currentUserId;
+  }
+  
+  // Fallback to simple array cycling with activity checks
   const currentIndex = playerIds.indexOf(currentUserId);
-  const nextIndex = (currentIndex + 1) % playerIds.length;
-  return playerIds[nextIndex];
+  
+  for (let i = 1; i <= playerIds.length; i++) {
+    const nextIndex = (currentIndex + i) % playerIds.length;
+    const nextUserId = playerIds[nextIndex];
+    
+    // Check if player is still active
+    if (roomData && players) {
+      const playerColor = players[nextUserId];
+      if (isPlayerActive(nextUserId, playerColor, roomData)) {
+        return nextUserId;
+      }
+    } else {
+      return nextUserId; // No room data, return next player
+    }
+  }
+  
+  // If no active player found, return current player
+  return currentUserId;
+}
+
+// Helper function to check if a player is still active in the game
+function isPlayerActive(userId, playerColor, roomData) {
+  if (!roomData) return true; // No room data, assume active
+  
+  // Check if player has disconnected/left
+  const escapedPlayers = roomData.escaped_players || [];
+  const kickedPlayers = roomData.kicked_players || [];
+  
+  if (escapedPlayers.includes(userId) ||
+      kickedPlayers.includes(userId)) {
+    console.log(
+      `⏭️ [TURN] Skipping escaped/kicked player: ${userId} (${playerColor})`,
+    );
+    return false;
+  }
+  
+  // Check if player has finished all tokens (all tokens at position 61 for 4-player game)
+  const winners = roomData.winners || [];
+  if (winners.includes(userId)) {
+    console.log(`⏭️ [TURN] Skipping finished player: ${userId} (${playerColor})`);
+    return false;
+  }
+  
+  // Additional check: verify if all tokens are actually at finish position
+  const positions = roomData.positions?.[playerColor];
+  if (positions) {
+    const noOfPlayers = roomData.no_of_players || 4;
+    const { homePosition } = getBoardConfig(noOfPlayers);
+    const allTokensFinished = Object.values(positions).every(pos => pos === homePosition);
+    
+    if (allTokensFinished) {
+      console.log(`⏭️ [TURN] Skipping player with all tokens finished: ${userId} (${playerColor})`);
+      return false;
+    }
+  }
+  
+  return true; // Player is active
 }
 
 // Generate UUID v4 for bots
