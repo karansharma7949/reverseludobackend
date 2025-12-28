@@ -1487,14 +1487,9 @@ app.post('/api/game-rooms/:roomId/pass-turn', authenticateUser, async (req, res)
     console.log(`   Room ID: ${roomId}`);
     console.log(`   Player ID: ${userId}`);
 
-    const { data: gameRoom, error: fetchError } = await supabaseAdmin
-      .from('game_rooms')
-      .select('*')
-      .eq('room_id', roomId)
-      .single();
-
-    if (fetchError || !gameRoom) {
-      console.log(`   ❌ Game room not found: ${fetchError?.message}`);
+    const { gameRoom, tableName } = await findGameRoom(roomId);
+    if (!gameRoom || !tableName) {
+      console.log(`   ❌ Game room not found`);
       return res.status(404).json({ error: 'Game room not found' });
     }
 
@@ -1527,18 +1522,28 @@ app.post('/api/game-rooms/:roomId/pass-turn', authenticateUser, async (req, res)
     console.log(`   Next player color: ${gameRoom.players[nextTurn]}`);
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
-      .from('game_rooms')
+      .from(tableName)
       .update({
         turn: nextTurn,
         dice_state: 'waiting',
         dice_result: null,
         pending_steps: updatedPendingSteps,
+        updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)
+      .eq('turn', userId)
+      .eq('game_state', 'playing')
       .select()
       .single();
 
-    if (updateError) throw updateError;
+    if (updateError) {
+      // If no rows updated, it likely means the turn already advanced (idempotent retry)
+      if (updateError.code === 'PGRST116') {
+        const { gameRoom: latestRoom } = await findGameRoom(roomId);
+        return res.json({ success: true, gameRoom: latestRoom, alreadyPassed: true });
+      }
+      throw updateError;
+    }
 
     console.log(`✅ TURN PASSED SUCCESSFULLY!`);
     console.log(`   🎯 TURN PASSED TO ${gameRoom.players[nextTurn]} player (${nextTurn})`);
