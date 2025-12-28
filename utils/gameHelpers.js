@@ -133,6 +133,39 @@ export function getBoardConfig(noOfPlayers) {
   return boardConfig[6];
 }
 
+// Check if destination is blocked by an opponent pair (2+ tokens on same square)
+// Standard Ludo rule: a block cannot be captured and cannot be landed on (unless safe spot)
+export function isBlockedByOpponent(gameRoom, movingColor, newPosition) {
+  const noOfPlayers = gameRoom.no_of_players || 4;
+  const stars = getStarPositions(noOfPlayers);
+  const { finalPosition } = getBoardConfig(noOfPlayers);
+
+  const isOnSafeSpot = stars.includes(newPosition);
+  if (isOnSafeSpot) return false;
+  if (newPosition <= 0 || newPosition >= finalPosition) return false;
+
+  const movingBoardPos = getBoardPosition(movingColor, newPosition, noOfPlayers);
+  if (!movingBoardPos) return false;
+
+  for (const [opponentColor, tokens] of Object.entries(gameRoom.positions || {})) {
+    if (opponentColor === movingColor) continue;
+
+    let countAtSquare = 0;
+    for (const opponentPos of Object.values(tokens || {})) {
+      if (opponentPos <= 0 || opponentPos >= finalPosition) continue;
+      const opponentBoardPos = getBoardPosition(opponentColor, opponentPos, noOfPlayers);
+      if (arePositionsSame(movingBoardPos, opponentBoardPos, noOfPlayers)) {
+        countAtSquare += 1;
+        if (countAtSquare >= 2) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 // Check for kills and return updated positions
 export function checkForKills(gameRoom, color, newPosition, updatedPositions) {
   const noOfPlayers = gameRoom.no_of_players || 4;
@@ -149,7 +182,29 @@ export function checkForKills(gameRoom, color, newPosition, updatedPositions) {
   if (!isOnSafeSpot && newPosition > 0 && newPosition < finalPosition) {
     const movingTokenBoardPos = getBoardPosition(color, newPosition, noOfPlayers);
     console.log(`Moving token board position:`, movingTokenBoardPos);
-    
+
+    // If there are 2+ opponent tokens already on this square (by coordinates), do not kill.
+    // (Allow stacking on that square, but no capture.)
+    let totalOpponentAtSquare = 0;
+    for (const [opponentColor, tokens] of Object.entries(gameRoom.positions)) {
+      if (opponentColor === color) continue;
+      for (const opponentPos of Object.values(tokens)) {
+        if (opponentPos <= 0 || opponentPos >= finalPosition) continue;
+        const opponentBoardPos = getBoardPosition(opponentColor, opponentPos, noOfPlayers);
+        if (arePositionsSame(movingTokenBoardPos, opponentBoardPos, noOfPlayers)) {
+          totalOpponentAtSquare += 1;
+          if (totalOpponentAtSquare >= 2) break;
+        }
+      }
+      if (totalOpponentAtSquare >= 2) break;
+    }
+
+    if (totalOpponentAtSquare >= 2) {
+      console.log(`🛡️ STACK PROTECTED: ${totalOpponentAtSquare} opponent tokens on square. No kill.`);
+      console.log(`=== END KILL CHECK ===\n`);
+      return { updatedPositions, bonusRoll: false };
+    }
+
     for (const [opponentColor, tokens] of Object.entries(gameRoom.positions)) {
       if (opponentColor === color) continue;
       

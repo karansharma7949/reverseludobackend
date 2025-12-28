@@ -607,18 +607,24 @@ async function botMove(room, tableName) {
         !safePositions.includes(bestMove.newPos)) {
       const botCoord = getCoordinateForPosition(botColor, bestMove.newPos, noOfPlayers);
       if (botCoord) {
+        const matches = [];
         for (const [otherColor, otherTokens] of Object.entries(newPositions)) {
           if (otherColor === botColor) continue;
           for (const [tokenName, tokenPos] of Object.entries(otherTokens)) {
             if (tokenPos > 0 && tokenPos < config.homeStretch) {
               const otherCoord = getCoordinateForPosition(otherColor, tokenPos, noOfPlayers);
               if (otherCoord && botCoord[0] === otherCoord[0] && botCoord[1] === otherCoord[1]) {
-                newPositions[otherColor][tokenName] = 0;
-                madeKill = true;
-                console.log(` [BOT] Killed ${otherColor}:${tokenName}!`);
+                matches.push({ otherColor, tokenName });
               }
             }
           }
+        }
+
+        if (matches.length === 1) {
+          const victim = matches[0];
+          newPositions[victim.otherColor][victim.tokenName] = 0;
+          madeKill = true;
+          console.log(` [BOT] Killed ${victim.otherColor}:${victim.tokenName}!`);
         }
       }
     }

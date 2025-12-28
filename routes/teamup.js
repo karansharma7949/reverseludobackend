@@ -455,6 +455,9 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
 
     console.log(`🚀 [TEAM UP BACKEND] Moving ${color} ${tokenName} from ${currentPos} to ${newPos}`);
 
+    const noOfPlayers = 4; // Team up is always 4 players
+    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
+
     // Update position
     const updatedPositions = { ...positions };
     if (!updatedPositions[color]) updatedPositions[color] = {};
@@ -463,42 +466,42 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     // Check for kills using grid coordinates (opponent team tokens only)
     const killedTokens = [];
     let bonusRoll = false;
-    
-    const noOfPlayers = 4; // Team up is always 4 players
-    
+
     // Get grid position of moving token
     const movingTokenGridPos = getBoardPosition(color, newPos, noOfPlayers);
     
     // Only check kills if not on safe spot and not in home column
     // CORRECT safe positions for 4-player board (from positions.js)
-    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
-    const isOnSafeSpot = safePositions.includes(newPos);
+    const isOnSafeSpotForKills = safePositions.includes(newPos);
     
-    if (!isOnSafeSpot && newPos > 0 && newPos < 61 && movingTokenGridPos) {
-      for (const [otherColor, otherTokens] of Object.entries(updatedPositions)) {
-        if (otherColor === color) continue; // Skip same color
-        
-        // Check if same team (Team A: red+blue, Team B: green+yellow)
-        const isTeamA = ['red', 'blue'].includes(color);
-        const otherIsTeamA = ['red', 'blue'].includes(otherColor);
-        if (isTeamA === otherIsTeamA) continue; // Skip teammate
-        
+    if (!isOnSafeSpotForKills && newPos > 0 && newPos < 61 && movingTokenGridPos) {
+      const isTeamA = ['red', 'blue'].includes(color);
+      const opponentColors = isTeamA ? ['green', 'yellow'] : ['red', 'blue'];
+      const matches = [];
+
+      for (const otherColor of opponentColors) {
+        const otherTokens = updatedPositions[otherColor] || {};
         for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
           if (otherPos <= 0 || otherPos >= 61) continue; // Skip home and finish
-          
-          // Get grid position of opponent token
+
           const opponentGridPos = getBoardPosition(otherColor, otherPos, noOfPlayers);
-          
-          // Compare grid coordinates
-          if (opponentGridPos && movingTokenGridPos.pos[0] === opponentGridPos.pos[0] && 
+          if (opponentGridPos &&
+              movingTokenGridPos.pos[0] === opponentGridPos.pos[0] &&
               movingTokenGridPos.pos[1] === opponentGridPos.pos[1]) {
-            // Kill opponent token
-            updatedPositions[otherColor] = { ...updatedPositions[otherColor], [otherTokenName]: 0 };
-            killedTokens.push(`${otherColor}:${otherTokenName}`);
-            bonusRoll = true;
-            console.log(`💀 [TEAM UP BACKEND] ${color} ${tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${otherColor} ${otherTokenName} (grid: [${opponentGridPos.pos}])`);
+            matches.push({ otherColor, otherTokenName, opponentGridPos });
           }
         }
+      }
+
+      if (matches.length === 1) {
+        const victim = matches[0];
+        updatedPositions[victim.otherColor] = {
+          ...updatedPositions[victim.otherColor],
+          [victim.otherTokenName]: 0,
+        };
+        killedTokens.push(`${victim.otherColor}:${victim.otherTokenName}`);
+        bonusRoll = true;
+        console.log(`💀 [TEAM UP BACKEND] ${color} ${tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${victim.otherColor} ${victim.otherTokenName} (grid: [${victim.opponentGridPos.pos}])`);
       }
     }
 
