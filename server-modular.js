@@ -392,7 +392,11 @@ app.post('/api/game-rooms/:roomId/fill-with-bots', authenticateUser, async (req,
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from('game_rooms')
-      .update({ players: updatedPlayers, positions: updatedPositions })
+      .update({
+        players: updatedPlayers,
+        positions: updatedPositions,
+        updated_at: new Date().toISOString(),
+      })
       .eq('room_id', roomId)
       .select()
       .single();
@@ -401,6 +405,45 @@ app.post('/api/game-rooms/:roomId/fill-with-bots', authenticateUser, async (req,
 
     console.log('   ✅ Bots added successfully');
     console.log('   Final players:', updatedPlayers);
+
+    // Auto-start if room is now full and still waiting
+    const newPlayerCount = Object.keys(updatedPlayers).length;
+    if (updatedRoom.game_state === 'waiting' && newPlayerCount >= updatedRoom.no_of_players) {
+      const playerIds = Object.keys(updatedPlayers);
+      const realPlayers = playerIds.filter(
+        (id) => !id.startsWith('bot_') && !id.startsWith('00000000-'),
+      );
+      const firstTurnPlayer = realPlayers.length > 0 ? realPlayers[0] : playerIds[0];
+
+      const { data: startedRoom, error: startError } = await supabaseAdmin
+        .from('game_rooms')
+        .update({
+          game_state: 'playing',
+          turn: firstTurnPlayer,
+          dice_state: 'waiting',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('room_id', roomId)
+        .select()
+        .single();
+
+      if (!startError && startedRoom) {
+        // Start autonomous backend bots for this room
+        try {
+          const startedBots = await startBotPlayersForGameRoom(roomId);
+          console.log(
+            `🤖 [FILL-WITH-BOTS] Started ${startedBots.length} autonomous bot players for game room ${roomId}`,
+          );
+        } catch (e) {
+          console.log(
+            `⚠️ [FILL-WITH-BOTS] Failed to start autonomous bots for ${roomId}: ${e?.message ?? e}`,
+          );
+        }
+
+        return res.json({ success: true, gameRoom: startedRoom, autoStarted: true });
+      }
+    }
+
     res.json({ success: true, gameRoom: updatedRoom });
   } catch (error) {
     console.error('Error filling room with bots:', error);
@@ -499,7 +542,8 @@ app.post('/api/game-rooms/:roomId/join', authenticateUser, async (req, res) => {
         .update({ 
           game_state: 'playing', 
           turn: firstTurnPlayer,
-          dice_state: 'waiting'
+          dice_state: 'waiting',
+          updated_at: new Date().toISOString(),
         })
         .eq('room_id', roomId)
         .select()
@@ -558,6 +602,10 @@ app.post('/api/game-rooms/:roomId/start', authenticateUser, async (req, res) => 
     console.log(`   Room host: ${gameRoom.host_id}`);
     console.log(`   Players: ${JSON.stringify(gameRoom.players)}`);
 
+    if (gameRoom.game_state !== 'waiting') {
+      return res.json({ success: true, gameRoom, message: 'Game already started' });
+    }
+
     if (gameRoom.host_id !== userId) {
       console.log(`   ❌ Not host - cannot start game`);
       return res.status(403).json({ error: 'Only host can start the game' });
@@ -584,7 +632,8 @@ app.post('/api/game-rooms/:roomId/start', authenticateUser, async (req, res) => 
       .update({ 
         game_state: 'playing', 
         turn: firstTurnPlayer,
-        dice_state: 'waiting'
+        dice_state: 'waiting',
+        updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)
       .select()
@@ -791,6 +840,7 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
       .update({
         dice_result: diceResult,
         dice_state: 'rolling',
+        updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)
       .neq('dice_state', 'rolling') // Only update if not already rolling
@@ -819,6 +869,7 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
             .from(tableName)
             .update({
               dice_state: 'complete',
+              updated_at: new Date().toISOString(),
             })
             .eq('room_id', roomId);
           
@@ -878,6 +929,7 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
           dice_state: 'waiting',
           dice_result: null,
           turn: nextTurn,
+          updated_at: new Date().toISOString(),
         })
         .eq('room_id', roomId)
         .select()
@@ -893,7 +945,11 @@ app.post('/api/game-rooms/:roomId/complete-dice', authenticateUser, async (req, 
 
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
       .from(tableName)
-      .update({ dice_state: 'complete', pending_steps: pendingSteps })
+      .update({
+        dice_state: 'complete',
+        pending_steps: pendingSteps,
+        updated_at: new Date().toISOString(),
+      })
       .eq('room_id', roomId)
       .select()
       .single();
@@ -1019,6 +1075,7 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
         dice_state: 'waiting',
         winners: updatedWinners,
         game_state: gameFinished ? 'finished' : 'playing',
+        updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)
       .select()
