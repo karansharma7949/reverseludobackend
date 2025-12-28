@@ -38,20 +38,28 @@ function _isPlayerActiveInRoom(room, userId) {
   return true;
 }
 
-function _getNextActiveTeamPlayer(room, currentUserId) {
-  const players = room.players || {};
-  const turnOrder = ['red', 'green', 'blue', 'yellow'];
-  const currentColor = players[currentUserId];
+function _getTeamTurnOrder(room) {
+  const teamA = room.team_a || [];
+  const teamB = room.team_b || [];
+  const order = [teamA[0], teamB[0], teamA[1], teamB[1]].filter(Boolean);
 
-  const startIndex = currentColor ? turnOrder.indexOf(currentColor) : -1;
+  // Fallback: if teams are not populated for some reason, derive from players map.
+  if (order.length === 0) {
+    return Object.keys(room.players || {});
+  }
+  return order;
+}
+
+function _getNextActiveTeamPlayer(room, currentUserId) {
+  const turnOrder = _getTeamTurnOrder(room);
+  if (!turnOrder || turnOrder.length === 0) return currentUserId;
+
+  const startIndex = currentUserId ? turnOrder.indexOf(currentUserId) : -1;
   for (let i = 1; i <= turnOrder.length; i++) {
     const nextIndex = startIndex === -1 ? (i - 1) : (startIndex + i) % turnOrder.length;
-    const nextColor = turnOrder[nextIndex];
-
-    for (const [userId, color] of Object.entries(players)) {
-      if (color === nextColor && _isPlayerActiveInRoom(room, userId)) {
-        return userId;
-      }
+    const nextUserId = turnOrder[nextIndex];
+    if (nextUserId && _isPlayerActiveInRoom(room, nextUserId)) {
+      return nextUserId;
     }
   }
 
@@ -1541,6 +1549,114 @@ router.get('/:roomId/should-bot-play/:userId', async (req, res) => {
     res.json({ shouldBotPlay, isDisconnected: disconnectedPlayers.includes(userId) });
   } catch (error) {
     console.error('Error checking bot play:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:roomId/distribute-winner-rewards', authenticateUser, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user.id;
+
+    const { data: room, error: fetchError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (fetchError || !room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    if (!room.players?.[userId]) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (room.game_state !== 'finished') {
+      return res.json({ success: true, skipped: true, reason: 'not_finished' });
+    }
+
+    const winners = room.winners || [];
+    if (!winners.length) {
+      return res.json({ success: true, skipped: true, reason: 'no_winners' });
+    }
+
+    const entryFee = Number(room.entry_fee ?? 0);
+    const winAmount = entryFee * 2;
+    if (!winAmount) {
+      return res.json({ success: true, skipped: true, reason: 'no_entry_fee' });
+    }
+
+    const firstWinner = winners[0];
+    const teamA = room.team_a || [];
+    const teamB = room.team_b || [];
+    const winningTeam = teamA.includes(firstWinner)
+      ? teamA
+      : teamB.includes(firstWinner)
+      ? teamB
+      : [];
+
+    if (!winningTeam.length) {
+      return res.json({ success: true, skipped: true, reason: 'no_winning_team' });
+    }
+
+    const { data: payoutLock, error: lockError } = await supabaseAdmin
+      .from('team_up_rooms')
+      .update({
+        payout_processed: true,
+        payout_processed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .eq('payout_processed', false)
+      .select('room_id')
+      .single();
+
+    if (lockError) {
+      if (lockError.code === 'PGRST116') {
+        return res.json({ success: true, alreadyProcessed: true, paid: [] });
+      }
+      throw lockError;
+    }
+
+    if (!payoutLock) {
+      return res.json({ success: true, alreadyProcessed: true, paid: [] });
+    }
+
+    const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+    const paid = [];
+
+    for (const winnerId of winningTeam) {
+      if (isBotId(winnerId)) continue;
+
+      const { error: rpcError } = await supabaseAdmin.rpc('add_coins', {
+        p_user_id: String(winnerId),
+        p_amount: winAmount,
+      });
+
+      if (rpcError) {
+        const { data: currentUser, error: fetchErr } = await supabaseAdmin
+          .from('users')
+          .select('total_coins')
+          .eq('uid', winnerId)
+          .single();
+
+        if (fetchErr) throw fetchErr;
+
+        const currentCoins = Number(currentUser?.total_coins ?? 0);
+        const { error: updErr } = await supabaseAdmin
+          .from('users')
+          .update({ total_coins: currentCoins + winAmount })
+          .eq('uid', winnerId);
+
+        if (updErr) throw updErr;
+      }
+
+      paid.push({ userId: winnerId, amount: winAmount });
+    }
+
+    return res.json({ success: true, paid });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });

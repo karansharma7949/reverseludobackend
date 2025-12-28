@@ -261,6 +261,117 @@ app.post('/api/game-rooms/:roomId/exit', authenticateUser, async (req, res) => {
   }
 });
 
+app.post(
+  '/api/game-rooms/:roomId/distribute-winner-rewards',
+  authenticateUser,
+  async (req, res) => {
+    try {
+      const { roomId } = req.params;
+      const userId = req.user.id;
+
+      const { gameRoom, tableName } = await findGameRoom(roomId);
+      if (!gameRoom || !tableName) {
+        return res.status(404).json({ error: 'Game room not found' });
+      }
+
+      if (tableName === 'tournament_rooms') {
+        return res.json({ success: true, skipped: true, reason: 'tournament' });
+      }
+
+      const players = gameRoom.players || {};
+      if (!players[userId]) {
+        return res.status(403).json({ error: 'Unauthorized' });
+      }
+
+      if (gameRoom.game_state !== 'finished') {
+        return res.json({ success: true, skipped: true, reason: 'not_finished' });
+      }
+
+      const winners = gameRoom.winners || [];
+      if (!winners.length) {
+        return res.json({ success: true, skipped: true, reason: 'no_winners' });
+      }
+
+      const entryFee = Number(gameRoom.entry_fee ?? 0);
+      const winAmount = entryFee * 2;
+      if (!winAmount) {
+        return res.json({ success: true, skipped: true, reason: 'no_entry_fee' });
+      }
+
+      const winnerId = winners[0];
+      const isBotId =
+        winnerId && (winnerId.startsWith('bot_') || winnerId.startsWith('00000000-'));
+      if (isBotId) {
+        const { error: markErr } = await supabaseAdmin
+          .from(tableName)
+          .update({
+            payout_processed: true,
+            payout_processed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('room_id', roomId)
+          .eq('payout_processed', false);
+
+        if (markErr) throw markErr;
+        return res.json({ success: true, paid: [], skipped: true, reason: 'bot_winner' });
+      }
+
+      const { data: payoutLock, error: lockError } = await supabaseAdmin
+        .from(tableName)
+        .update({
+          payout_processed: true,
+          payout_processed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('room_id', roomId)
+        .eq('payout_processed', false)
+        .select('room_id')
+        .single();
+
+      if (lockError) {
+        if (lockError.code === 'PGRST116') {
+          return res.json({ success: true, alreadyProcessed: true, paid: [] });
+        }
+        throw lockError;
+      }
+
+      if (!payoutLock) {
+        return res.json({ success: true, alreadyProcessed: true, paid: [] });
+      }
+
+      const { error: rpcError } = await supabaseAdmin.rpc('add_coins', {
+        p_user_id: String(winnerId),
+        p_amount: winAmount,
+      });
+
+      if (rpcError) {
+        const { data: currentUser, error: fetchErr } = await supabaseAdmin
+          .from('users')
+          .select('total_coins')
+          .eq('uid', winnerId)
+          .single();
+
+        if (fetchErr) throw fetchErr;
+
+        const currentCoins = Number(currentUser?.total_coins ?? 0);
+        const { error: updErr } = await supabaseAdmin
+          .from('users')
+          .update({ total_coins: currentCoins + winAmount })
+          .eq('uid', winnerId);
+
+        if (updErr) throw updErr;
+      }
+
+      return res.json({
+        success: true,
+        paid: [{ userId: winnerId, amount: winAmount }],
+      });
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  },
+);
+
 // Create game room
 app.post('/api/game-rooms/create', authenticateUser, async (req, res) => {
   try {
