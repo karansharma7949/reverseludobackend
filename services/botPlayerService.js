@@ -636,6 +636,28 @@ async function botMove(room, tableName) {
     winners.push(botId);
     console.log(` [BOT] ${botId} finished! Position: ${winners.length}`);
   }
+
+  const isTeamUpTable = tableName === DEFAULT_TABLES.teamUp;
+  const getTeamWinIfAny = () => {
+    const teamA = room.team_a || [];
+    const teamB = room.team_b || [];
+    if (teamA.length !== 2 || teamB.length !== 2) return [];
+
+    const allTokensFinishedFor = (userId) => {
+      const color = room.players?.[userId];
+      if (!color) return false;
+      const pos = newPositions[color];
+      if (!pos) return false;
+      return Object.values(pos).every((p) => p === config.homePosition);
+    };
+
+    const teamAFinished = teamA.every((id) => allTokensFinishedFor(id));
+    const teamBFinished = teamB.every((id) => allTokensFinishedFor(id));
+
+    if (teamAFinished && !teamBFinished) return teamA;
+    if (teamBFinished && !teamAFinished) return teamB;
+    return [];
+  };
   
   const updatedSkipPlayers = [...skipPlayers, ...winners.filter(w => !skipPlayers.includes(w))];
   const gotSix = pendingSteps === 6;
@@ -644,7 +666,28 @@ async function botMove(room, tableName) {
   const nextTurn = keepsTurn
     ? botId
     : getNextTurn(room.players, botId, updatedSkipPlayers, noOfPlayers, tableName);
-  const gameFinished = winners.length >= Object.keys(room.players).length - 1;
+
+  let gameFinished;
+  if (isTeamUpTable) {
+    const winningTeam = getTeamWinIfAny();
+    gameFinished = winningTeam.length === 2;
+    if (gameFinished) {
+      const teamA = room.team_a || [];
+      const teamB = room.team_b || [];
+      const winningIsTeamA =
+        teamA.length === winningTeam.length &&
+        teamA.every((id) => winningTeam.includes(id));
+      const losingTeam = winningIsTeamA ? teamB : teamA;
+
+      const winningOrder = winners.filter((id) => winningTeam.includes(id));
+      const winningRemaining = winningTeam.filter((id) => !winningOrder.includes(id));
+      const losingOrder = winners.filter((id) => losingTeam.includes(id));
+      const losingRemaining = losingTeam.filter((id) => !losingOrder.includes(id));
+      winners = [...winningOrder, ...winningRemaining, ...losingOrder, ...losingRemaining];
+    }
+  } else {
+    gameFinished = winners.length >= Object.keys(room.players).length - 1;
+  }
   
   console.log(` [BOT] Next turn: ${nextTurn} (six=${gotSix}, kill=${madeKill}, finish=${reachedFinish})`);
   

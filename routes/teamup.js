@@ -66,6 +66,93 @@ function _getNextActiveTeamPlayer(room, currentUserId) {
   return currentUserId;
 }
 
+function _getWinningTeamIfAny(room) {
+  const teamA = room?.team_a || [];
+  const teamB = room?.team_b || [];
+  if (teamA.length !== 2 || teamB.length !== 2) return [];
+
+  const teamAFinished = teamA.every((id) => _areAllTokensFinished(room, id));
+  const teamBFinished = teamB.every((id) => _areAllTokensFinished(room, id));
+
+  if (teamAFinished && !teamBFinished) return teamA;
+  if (teamBFinished && !teamAFinished) return teamB;
+  return [];
+}
+
+async function _processTeamUpPayoutIfNeeded(roomId, room) {
+  if (!room) return;
+  if (room.game_state !== 'finished') return;
+
+  const winners = room.winners || [];
+  if (!winners.length) return;
+
+  const entryFee = Number(room.entry_fee ?? 0);
+  const winAmount = entryFee * 2;
+  if (!winAmount) return;
+
+  const winningTeamFromFinish = _getWinningTeamIfAny(room);
+  const firstWinner = winners[0];
+  const teamA = room.team_a || [];
+  const teamB = room.team_b || [];
+  const winningTeam = winningTeamFromFinish.length
+    ? winningTeamFromFinish
+    : teamA.includes(firstWinner)
+    ? teamA
+    : teamB.includes(firstWinner)
+    ? teamB
+    : [];
+
+  if (!winningTeam.length) return;
+
+  const { data: payoutLock, error: lockError } = await supabaseAdmin
+    .from('team_up_rooms')
+    .update({
+      payout_processed: true,
+      payout_processed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('room_id', roomId)
+    .eq('payout_processed', false)
+    .select('room_id')
+    .single();
+
+  if (lockError) {
+    if (lockError.code === 'PGRST116') return;
+    throw lockError;
+  }
+
+  if (!payoutLock) return;
+
+  const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+
+  for (const winnerId of winningTeam) {
+    if (isBotId(winnerId)) continue;
+
+    const { error: rpcError } = await supabaseAdmin.rpc('add_coins', {
+      p_user_id: String(winnerId),
+      p_amount: winAmount,
+    });
+
+    if (rpcError) {
+      const { data: currentUser, error: fetchErr } = await supabaseAdmin
+        .from('users')
+        .select('total_coins')
+        .eq('uid', winnerId)
+        .single();
+
+      if (fetchErr) throw fetchErr;
+
+      const currentCoins = Number(currentUser?.total_coins ?? 0);
+      const { error: updErr } = await supabaseAdmin
+        .from('users')
+        .update({ total_coins: currentCoins + winAmount })
+        .eq('uid', winnerId);
+
+      if (updErr) throw updErr;
+    }
+  }
+}
+
 async function _finalizeDisconnectRemoval(roomId, userId) {
   _clearDisconnectRemovalTimer(roomId, userId);
 
@@ -539,7 +626,31 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
 
     console.log(`🔄 [TEAM UP BACKEND] Next turn: ${nextTurn} (steps: ${stepsToMove}, kills: ${killedTokens.length})`);
 
-    const gameFinished = winners.length >= Object.keys(room.players || {}).length - 1;
+    const roomForFinish = {
+      ...room,
+      winners,
+      positions: updatedPositions,
+      pending_steps: updatedPendingSteps,
+    };
+
+    const winningTeam = _getWinningTeamIfAny(roomForFinish);
+    const gameFinished = winningTeam.length === 2;
+
+    if (gameFinished) {
+      const teamA = roomForFinish.team_a || [];
+      const teamB = roomForFinish.team_b || [];
+      const winningIsTeamA =
+        teamA.length === winningTeam.length &&
+        teamA.every((id) => winningTeam.includes(id));
+      const losingTeam = winningIsTeamA ? teamB : teamA;
+
+      const winningOrder = winners.filter((id) => winningTeam.includes(id));
+      const winningRemaining = winningTeam.filter((id) => !winningOrder.includes(id));
+      const losingOrder = winners.filter((id) => losingTeam.includes(id));
+      const losingRemaining = losingTeam.filter((id) => !losingOrder.includes(id));
+
+      winners = [...winningOrder, ...winningRemaining, ...losingOrder, ...losingRemaining];
+    }
 
     // Update room
     const { data: updatedRoom, error: updateError } = await supabaseAdmin
@@ -561,6 +672,14 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     if (updateError) {
       console.log(`❌ [TEAM UP BACKEND] Update error: ${updateError.message}`);
       throw updateError;
+    }
+
+    if (updatedRoom?.game_state === 'finished') {
+      try {
+        await _processTeamUpPayoutIfNeeded(roomId, updatedRoom);
+      } catch (e) {
+        console.error('Error processing team-up payout:', e);
+      }
     }
 
     console.log(`✅ [TEAM UP BACKEND] Token moved successfully`);
