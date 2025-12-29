@@ -10,9 +10,17 @@ import tournamentsRouter from './routes/tournaments.js';
 import teamupRouter from './routes/teamup.js';
 import chatRouter from './routes/chat.js';
 import teamupBotsRouter from './routes/teamupBots.js';
+import eventsRouter from './routes/events.js';
 
 // Bot players service (autonomous realtime bots)
 import { startBotPlayersForGameRoom } from './services/botPlayerService.js';
+
+// Events progress tracking
+import {
+  recordKills,
+  recordGamePlayed,
+  recordGameWon,
+} from './services/eventsProgressService.js';
 
 // Import config
 import { supabaseAdmin } from './config/supabase.js';
@@ -68,6 +76,9 @@ app.use('/api/tournaments', tournamentsRouter);
 
 // Chat routes (messages and gifts)
 app.use('/api/chat', chatRouter);
+
+// Events routes
+app.use('/api/events', eventsRouter);
 
 // ============================================
 // GAME ROOM ENDPOINTS
@@ -1150,6 +1161,33 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
     updatedPositions = killResult.updatedPositions;
     const bonusRoll = killResult.bonusRoll;
 
+    // Count actual kills by diffing old positions vs updated positions.
+    // checkForKills may kill more than one token (across different opponent colors).
+    let killedCount = 0;
+    try {
+      const before = gameRoom.positions || {};
+      const after = updatedPositions || {};
+      for (const [opponentColor, tokens] of Object.entries(before)) {
+        if (opponentColor === color) continue;
+        for (const [tokenKey, beforePos] of Object.entries(tokens || {})) {
+          const afterPos = after?.[opponentColor]?.[tokenKey];
+          if (Number(beforePos) > 0 && Number(afterPos) === 0) {
+            killedCount += 1;
+          }
+        }
+      }
+    } catch (e) {
+      // Non-fatal: keep killedCount as 0
+    }
+
+    if (killedCount > 0) {
+      try {
+        await recordKills({ killerUserId: userId, kills: killedCount });
+      } catch (e) {
+        console.error('[EventsProgress] recordKills failed:', e?.message ?? e);
+      }
+    }
+
     const allTokensHome = checkAllTokensHome(updatedPositions[color], noOfPlayers);
     let updatedWinners = [...(gameRoom.winners || [])];
     
@@ -1193,6 +1231,48 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
       .single();
 
     if (updateError) throw updateError;
+
+    // Idempotent match-finish tracking: use events_tracked column (added in CREATE_EVENTS_SYSTEM.sql)
+    if (updatedRoom?.game_state === 'finished' && tableName !== 'tournament_rooms') {
+      try {
+        const { data: lockRow, error: lockErr } = await supabaseAdmin
+          .from(tableName)
+          .update({
+            events_tracked: true,
+            events_tracked_at: new Date().toISOString(),
+          })
+          .eq('room_id', roomId)
+          .eq('events_tracked', false)
+          .select('room_id')
+          .maybeSingle();
+
+        if (lockErr) {
+          if (lockErr.code !== 'PGRST116') {
+            console.error('[EventsProgress] events_tracked lock error:', lockErr);
+          }
+        }
+
+        if (lockRow) {
+          const players = updatedRoom.players || {};
+          const allPlayerIds = Object.keys(players);
+          const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+          const humanIds = allPlayerIds.filter((id) => !isBotId(id));
+
+          const winners = updatedRoom.winners || [];
+          const winnerId = winners[0];
+          const winnerIsBot = winnerId && isBotId(winnerId);
+
+          const mode = tableName === 'friend_rooms' ? 'friends' : 'online';
+
+          await recordGamePlayed({ userIds: humanIds, mode });
+          if (!winnerIsBot && winnerId) {
+            await recordGameWon({ winnerUserIds: [winnerId], mode });
+          }
+        }
+      } catch (e) {
+        console.error('[EventsProgress] finish tracking failed:', e?.message ?? e);
+      }
+    }
 
     res.json({ success: true, gameRoom: updatedRoom, bonusRoll, killed: bonusRoll });
   } catch (error) {

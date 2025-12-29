@@ -3,6 +3,12 @@ import { supabaseAdmin } from '../config/supabase.js';
 import { authenticateUser } from '../middleware/auth.js';
 import { getBoardPosition } from '../utils/gameHelpers.js';
 
+import {
+  recordKills,
+  recordGamePlayed,
+  recordGameWon,
+} from '../services/eventsProgressService.js';
+
 const router = express.Router();
 
 const DISCONNECT_GRACE_MS = 30_000;
@@ -588,7 +594,9 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
         };
         killedTokens.push(`${victim.otherColor}:${victim.otherTokenName}`);
         bonusRoll = true;
-        console.log(`💀 [TEAM UP BACKEND] ${color} ${tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${victim.otherColor} ${victim.otherTokenName} (grid: [${victim.opponentGridPos.pos}])`);
+        console.log(
+          `💀 [TEAM UP BACKEND] ${color} ${tokenName} (grid: [${movingTokenGridPos.pos}]) killed ${victim.otherColor} ${victim.otherTokenName} (grid: [${victim.opponentGridPos.pos}])`,
+        );
       }
     }
 
@@ -672,6 +680,53 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     if (updateError) {
       console.log(`❌ [TEAM UP BACKEND] Update error: ${updateError.message}`);
       throw updateError;
+    }
+
+    if (killedTokens.length > 0) {
+      try {
+        await recordKills({ killerUserId: userId, kills: killedTokens.length });
+      } catch (e) {
+        console.error('[EventsProgress] recordKills failed (teamup):', e?.message ?? e);
+      }
+    }
+
+    // Idempotent match-finish tracking: use events_tracked column (added in CREATE_EVENTS_SYSTEM.sql)
+    if (updatedRoom?.game_state === 'finished') {
+      try {
+        const { data: lockRow, error: lockErr } = await supabaseAdmin
+          .from('team_up_rooms')
+          .update({
+            events_tracked: true,
+            events_tracked_at: new Date().toISOString(),
+          })
+          .eq('room_id', roomId)
+          .eq('events_tracked', false)
+          .select('room_id')
+          .maybeSingle();
+
+        if (lockErr) {
+          if (lockErr.code !== 'PGRST116') {
+            console.error('[EventsProgress] events_tracked lock error (teamup):', lockErr);
+          }
+        }
+
+        if (lockRow) {
+          const players = updatedRoom.players || {};
+          const allPlayerIds = Object.keys(players);
+          const isBotId = (id) => id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+          const humanIds = allPlayerIds.filter((id) => !isBotId(id));
+
+          await recordGamePlayed({ userIds: humanIds, mode: 'teamup' });
+
+          const winningTeam = _getWinningTeamIfAny(updatedRoom);
+          const winningHumans = (winningTeam || []).filter((id) => !isBotId(id));
+          if (winningHumans.length) {
+            await recordGameWon({ winnerUserIds: winningHumans, mode: 'teamup' });
+          }
+        }
+      } catch (e) {
+        console.error('[EventsProgress] finish tracking failed (teamup):', e?.message ?? e);
+      }
     }
 
     if (updatedRoom?.game_state === 'finished') {
