@@ -9,6 +9,8 @@ import {
   recordGameWon,
 } from '../services/eventsProgressService.js';
 
+import { recordMatchResult } from '../services/userStatsService.js';
+
 const router = express.Router();
 
 const DISCONNECT_GRACE_MS = 30_000;
@@ -722,6 +724,16 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
           const winningHumans = (winningTeam || []).filter((id) => !isBotId(id));
           if (winningHumans.length) {
             await recordGameWon({ winnerUserIds: winningHumans, mode: 'teamup' });
+          }
+
+          try {
+            const losingHumans = humanIds.filter((id) => !(winningTeam || []).includes(id));
+            await recordMatchResult({
+              winnerUserIds: winningHumans,
+              loserUserIds: losingHumans,
+            });
+          } catch (e) {
+            console.error('[UserStats] recordMatchResult failed (teamup):', e?.message ?? e);
           }
         }
       } catch (e) {

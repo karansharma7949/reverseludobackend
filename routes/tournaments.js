@@ -1,6 +1,8 @@
 import express from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 
+import { recordMatchResult, recordTournamentWon } from '../services/userStatsService.js';
+
 const router = express.Router();
 
 // Join a tournament
@@ -241,17 +243,34 @@ router.post('/semifinal-complete', async (req, res) => {
     const { roomId, winnerId, loserId, tournamentId } = req.body;
 
     // Update the room with winner
-    const { error: roomUpdateError } = await supabaseAdmin
+    const { data: roomLock, error: roomUpdateError } = await supabaseAdmin
       .from('tournament_rooms')
       .update({ 
         game_state: 'finished', 
         winners: [winnerId] 
       })
-      .eq('id', roomId);
+      .eq('id', roomId)
+      .neq('game_state', 'finished')
+      .select('id')
+      .maybeSingle();
 
     if (roomUpdateError) {
       console.error('Error updating room winner:', roomUpdateError);
       return res.status(500).json({ error: 'Failed to update room winner' });
+    }
+
+    if (roomLock) {
+      try {
+        await recordMatchResult({
+          winnerUserIds: winnerId ? [winnerId] : [],
+          loserUserIds: loserId ? [loserId] : [],
+        });
+      } catch (e) {
+        console.error(
+          '[UserStats] recordMatchResult failed (tournament semifinal):',
+          e?.message ?? e,
+        );
+      }
     }
 
     // Update participant statuses in tournament
@@ -365,17 +384,34 @@ router.post('/final-complete', async (req, res) => {
     const { roomId, winnerId, loserId, tournamentId } = req.body;
 
     // Update the final room with winner
-    const { error: roomUpdateError } = await supabaseAdmin
+    const { data: roomLock, error: roomUpdateError } = await supabaseAdmin
       .from('tournament_rooms')
       .update({ 
         game_state: 'finished', 
         winners: [winnerId] 
       })
-      .eq('id', roomId);
+      .eq('id', roomId)
+      .neq('game_state', 'finished')
+      .select('id')
+      .maybeSingle();
 
     if (roomUpdateError) {
       console.error('Error updating final room winner:', roomUpdateError);
       return res.status(500).json({ error: 'Failed to update final room winner' });
+    }
+
+    if (roomLock) {
+      try {
+        await recordMatchResult({
+          winnerUserIds: winnerId ? [winnerId] : [],
+          loserUserIds: loserId ? [loserId] : [],
+        });
+      } catch (e) {
+        console.error(
+          '[UserStats] recordMatchResult failed (tournament final):',
+          e?.message ?? e,
+        );
+      }
     }
 
     // Check if both final rooms have winners
@@ -399,6 +435,35 @@ router.post('/final-complete', async (req, res) => {
         .select('*')
         .eq('tournament_id', tournamentId)
         .single();
+
+      if (tournament?.status === 'completed') {
+        return res.json({
+          success: true,
+          tournamentComplete: true,
+          alreadyCompleted: true,
+        });
+      }
+
+      const { data: completionLock, error: completionLockErr } = await supabaseAdmin
+        .from('tournaments')
+        .update({ status: 'completed' })
+        .eq('tournament_id', tournamentId)
+        .neq('status', 'completed')
+        .select('tournament_id')
+        .maybeSingle();
+
+      if (completionLockErr) {
+        console.error('Error locking tournament completion:', completionLockErr);
+        return res.status(500).json({ error: 'Failed to complete tournament' });
+      }
+
+      if (!completionLock) {
+        return res.json({
+          success: true,
+          tournamentComplete: true,
+          alreadyCompleted: true,
+        });
+      }
 
       const prizePool = tournament.reward_amount || 0;
       // Both final winners share 1st place prize equally (50% each of 80%)
@@ -469,12 +534,17 @@ router.post('/final-complete', async (req, res) => {
       // Update tournament as completed
       await supabaseAdmin
         .from('tournaments')
-        .update({ 
-          status: 'completed',
+        .update({
           final_rankings: rankings,
-          tournament_participants: participants
+          tournament_participants: participants,
         })
         .eq('tournament_id', tournamentId);
+
+      try {
+        await recordTournamentWon({ winnerUserIds: finalWinners });
+      } catch (e) {
+        console.error('[UserStats] recordTournamentWon failed:', e?.message ?? e);
+      }
 
       res.json({ 
         success: true, 

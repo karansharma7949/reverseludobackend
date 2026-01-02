@@ -14,7 +14,6 @@ async function _getActiveEvents() {
     .from('events')
     .select('id, title, description, banner_url, start_at, end_at, is_active, display_order')
     .eq('is_active', true)
-    .lte('start_at', nowIso)
     .gte('end_at', nowIso)
     .order('display_order', { ascending: true })
     .order('start_at', { ascending: true });
@@ -48,7 +47,6 @@ router.get('/:eventId', authenticateUser, async (req, res) => {
       .select('id, title, description, banner_url, start_at, end_at, is_active, display_order')
       .eq('id', eventId)
       .eq('is_active', true)
-      .lte('start_at', nowIso)
       .gte('end_at', nowIso)
       .maybeSingle();
 

@@ -14,6 +14,8 @@ import { supabaseAdmin } from '../config/supabase.js';
 import { positions4Player, positions5Player, positions6Player } from '../data/positions.js';
 import { checkForKills, getStarPositions } from '../utils/gameHelpers.js';
 
+import { recordMatchResult } from './userStatsService.js';
+
 // ============================================
 // CONSTANTS
 // ============================================
@@ -68,6 +70,31 @@ function isBot(userId) {
 
 function isTableNonTeamUp(tableName) {
   return tableName !== DEFAULT_TABLES.teamUp;
+}
+
+function isBotId(id) {
+  return id && (id.startsWith('00000000-') || id.startsWith('bot_'));
+}
+
+function getWinningTeamIfAny({ room, positions, homePosition }) {
+  const teamA = room.team_a || [];
+  const teamB = room.team_b || [];
+  if (teamA.length !== 2 || teamB.length !== 2) return [];
+
+  const allTokensFinishedFor = (userId) => {
+    const color = room.players?.[userId];
+    if (!color) return false;
+    const pos = positions?.[color];
+    if (!pos) return false;
+    return Object.values(pos).every((p) => p === homePosition);
+  };
+
+  const teamAFinished = teamA.every((id) => allTokensFinishedFor(id));
+  const teamBFinished = teamB.every((id) => allTokensFinishedFor(id));
+
+  if (teamAFinished && !teamBFinished) return teamA;
+  if (teamBFinished && !teamAFinished) return teamB;
+  return [];
 }
 
 function clearTurnTimeout(roomId, tableName) {
@@ -296,6 +323,53 @@ async function handleTurnTimeout(roomId, tableName, expectedTurn) {
       updated_at: new Date().toISOString(),
     })
     .eq('room_id', roomId);
+
+  if (gameFinished && tableName !== 'tournament_rooms') {
+    try {
+      const { data: lockRow, error: lockErr } = await supabaseAdmin
+        .from(tableName)
+        .update({ events_tracked: true, events_tracked_at: new Date().toISOString() })
+        .eq('room_id', roomId)
+        .eq('events_tracked', false)
+        .select('room_id')
+        .maybeSingle();
+
+      if (lockErr) {
+        if (lockErr.code !== 'PGRST116') {
+          console.error('[UserStats] events_tracked lock error (bot):', lockErr);
+        }
+      }
+
+      if (lockRow) {
+        const players = room.players || {};
+        const allPlayerIds = Object.keys(players);
+        const humanIds = allPlayerIds.filter((id) => !isBotId(id));
+
+        if (tableName === DEFAULT_TABLES.teamUp) {
+          const winningTeam = getWinningTeamIfAny({
+            room,
+            positions: newPositions,
+            homePosition: config.homePosition,
+          });
+          const winningHumans = (winningTeam || []).filter((id) => !isBotId(id));
+          const losingHumans = humanIds.filter((id) => !(winningTeam || []).includes(id));
+          await recordMatchResult({ winnerUserIds: winningHumans, loserUserIds: losingHumans });
+        } else {
+          const winnerId = winners?.[0];
+          const winnerIsBot = winnerId && isBotId(winnerId);
+          const loserHumanIds = winnerIsBot
+            ? humanIds
+            : humanIds.filter((id) => id !== winnerId);
+          await recordMatchResult({
+            winnerUserIds: winnerIsBot || !winnerId ? [] : [winnerId],
+            loserUserIds: loserHumanIds,
+          });
+        }
+      }
+    } catch (e) {
+      console.error('[UserStats] recordMatchResult failed (bot):', e?.message ?? e);
+    }
+  }
 }
 
 function getBotProfile(botId) {
@@ -638,6 +712,7 @@ async function botMove(room, tableName) {
   }
 
   const isTeamUpTable = tableName === DEFAULT_TABLES.teamUp;
+  let winningTeam = [];
   const getTeamWinIfAny = () => {
     const teamA = room.team_a || [];
     const teamB = room.team_b || [];
@@ -669,7 +744,7 @@ async function botMove(room, tableName) {
 
   let gameFinished;
   if (isTeamUpTable) {
-    const winningTeam = getTeamWinIfAny();
+    winningTeam = getTeamWinIfAny();
     gameFinished = winningTeam.length === 2;
     if (gameFinished) {
       const teamA = room.team_a || [];
@@ -706,6 +781,48 @@ async function botMove(room, tableName) {
     .eq('room_id', room.room_id)
     .eq('turn', botId)
     .eq('dice_state', 'complete');
+
+  if (!error && gameFinished && tableName !== 'tournament_rooms') {
+    try {
+      const { data: lockRow, error: lockErr } = await supabaseAdmin
+        .from(tableName)
+        .update({ events_tracked: true, events_tracked_at: new Date().toISOString() })
+        .eq('room_id', room.room_id)
+        .eq('events_tracked', false)
+        .select('room_id')
+        .maybeSingle();
+
+      if (lockErr) {
+        if (lockErr.code !== 'PGRST116') {
+          console.error('[UserStats] events_tracked lock error (bot ai):', lockErr);
+        }
+      }
+
+      if (lockRow) {
+        const players = room.players || {};
+        const allPlayerIds = Object.keys(players);
+        const humanIds = allPlayerIds.filter((id) => !isBotId(id));
+
+        if (isTeamUpTable) {
+          const winningHumans = (winningTeam || []).filter((id) => !isBotId(id));
+          const losingHumans = humanIds.filter((id) => !(winningTeam || []).includes(id));
+          await recordMatchResult({ winnerUserIds: winningHumans, loserUserIds: losingHumans });
+        } else {
+          const winnerId = winners?.[0];
+          const winnerIsBot = winnerId && isBotId(winnerId);
+          const loserHumanIds = winnerIsBot
+            ? humanIds
+            : humanIds.filter((id) => id !== winnerId);
+          await recordMatchResult({
+            winnerUserIds: winnerIsBot || !winnerId ? [] : [winnerId],
+            loserUserIds: loserHumanIds,
+          });
+        }
+      }
+    } catch (e) {
+      console.error('[UserStats] recordMatchResult failed (bot ai):', e?.message ?? e);
+    }
+  }
   
   if (error) console.error(` [BOT] Move error:`, error);
   else console.log(` [BOT] Move complete`);

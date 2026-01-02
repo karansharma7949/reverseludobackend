@@ -22,6 +22,8 @@ import {
   recordGameWon,
 } from './services/eventsProgressService.js';
 
+import { recordMatchResult } from './services/userStatsService.js';
+
 // Import config
 import { supabaseAdmin } from './config/supabase.js';
 
@@ -1267,6 +1269,18 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
           await recordGamePlayed({ userIds: humanIds, mode });
           if (!winnerIsBot && winnerId) {
             await recordGameWon({ winnerUserIds: [winnerId], mode });
+          }
+
+          try {
+            const loserHumanIds = winnerIsBot
+              ? humanIds
+              : humanIds.filter((id) => id !== winnerId);
+            await recordMatchResult({
+              winnerUserIds: winnerIsBot || !winnerId ? [] : [winnerId],
+              loserUserIds: loserHumanIds,
+            });
+          } catch (e) {
+            console.error('[UserStats] recordMatchResult failed:', e?.message ?? e);
           }
         }
       } catch (e) {
