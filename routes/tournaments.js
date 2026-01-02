@@ -23,7 +23,14 @@ router.get('/', async (req, res) => {
     } else if (status === 'started') {
       query = query
         .lte('tournament_start_time', now)
+        .not('tournament_end_time', 'is', null)
+        .gt('tournament_end_time', now)
         .order('tournament_start_time', { ascending: false });
+    } else if (status === 'finished') {
+      query = query
+        .not('tournament_end_time', 'is', null)
+        .lte('tournament_end_time', now)
+        .order('tournament_end_time', { ascending: false });
     } else {
       query = query.order('tournament_start_time', { ascending: false });
     }
