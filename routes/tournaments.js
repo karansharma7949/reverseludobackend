@@ -5,6 +5,41 @@ import { recordMatchResult, recordTournamentWon } from '../services/userStatsSer
 
 const router = express.Router();
 
+router.get('/', async (req, res) => {
+  try {
+    const { status } = req.query;
+    const now = new Date().toISOString();
+
+    let query = supabaseAdmin
+      .from('tournament')
+      .select('*')
+      .not('tournament_start_time', 'is', null)
+      .not('tournament_main_banner', 'is', null);
+
+    if (status === 'upcoming') {
+      query = query
+        .gt('tournament_start_time', now)
+        .order('tournament_start_time', { ascending: true });
+    } else if (status === 'started') {
+      query = query
+        .lte('tournament_start_time', now)
+        .order('tournament_start_time', { ascending: false });
+    } else {
+      query = query.order('tournament_start_time', { ascending: false });
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json({ tournaments: data || [] });
+  } catch (error) {
+    console.error('Error listing tournaments:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // Join a tournament
 router.post('/join', async (req, res) => {
   try {
