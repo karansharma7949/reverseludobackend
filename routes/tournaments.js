@@ -5,10 +5,12 @@ import { recordMatchResult, recordTournamentWon } from '../services/userStatsSer
 
 const router = express.Router();
 
+const TOURNAMENT_TIME_OFFSET_MS = 330 * 60 * 1000;
+
 router.get('/', async (req, res) => {
   try {
     const { status } = req.query;
-    const now = new Date().toISOString();
+    const now = new Date(Date.now() + TOURNAMENT_TIME_OFFSET_MS).toISOString();
 
     let query = supabaseAdmin
       .from('tournament')
