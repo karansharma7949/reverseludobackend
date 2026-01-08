@@ -103,12 +103,18 @@ app.post('/api/game-rooms/quick-match', authenticateUser, async (req, res) => {
 
     const desiredEntryFee = Number(entryFee ?? 0);
 
+    const minCreatedAt =
+      noOfPlayers === 4
+        ? new Date(Date.now() - 35 * 1000).toISOString()
+        : null;
+
     const { data: availableRooms, error: searchError } = await supabaseAdmin
       .from('game_rooms')
       .select('*')
       .eq('game_state', 'waiting')
       .eq('no_of_players', noOfPlayers)
       .eq('entry_fee', desiredEntryFee)
+      .gte('created_at', minCreatedAt ?? '1970-01-01T00:00:00.000Z')
       .order('created_at', { ascending: true });
 
     if (searchError) throw searchError;
@@ -1323,6 +1329,49 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
     if (!playerColor) {
       console.log(`   ⚠️ Player not in room players map, treating as already-left`);
       return res.json({ success: true, gameRoom });
+    }
+
+    if ((tableName === 'game_rooms' || tableName === 'friend_rooms') && gameRoom.game_state !== 'playing') {
+      const updatedPlayers = { ...players };
+      delete updatedPlayers[userId];
+
+      const updatedPendingSteps = { ...(gameRoom.pending_steps || {}) };
+      delete updatedPendingSteps[userId];
+
+      const updatedPositions = { ...(gameRoom.positions || {}) };
+      if (playerColor && updatedPositions[playerColor]) {
+        delete updatedPositions[playerColor];
+      }
+
+      const remainingIds = Object.keys(updatedPlayers);
+      if (remainingIds.length === 0) {
+        await supabaseAdmin.from(tableName).delete().eq('room_id', roomId);
+        return res.json({ success: true, roomDeleted: true });
+      }
+
+      let nextHostId = gameRoom.host_id;
+      if (gameRoom.host_id === userId) {
+        nextHostId = remainingIds[0];
+      }
+
+      const { data: updatedRoom, error: updateError } = await supabaseAdmin
+        .from(tableName)
+        .update({
+          host_id: nextHostId,
+          players: updatedPlayers,
+          positions: updatedPositions,
+          pending_steps: updatedPendingSteps,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('room_id', roomId)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
+
+      console.log(`   ✅ Player ${userId} left waiting room ${roomId} successfully`);
+      console.log(`   Remaining players count: ${Object.keys(updatedPlayers).length}`);
+      return res.json({ success: true, gameRoom: updatedRoom, leftWaitingRoom: true });
     }
 
     const escapedPlayers = [...(gameRoom.escaped_players || [])];
