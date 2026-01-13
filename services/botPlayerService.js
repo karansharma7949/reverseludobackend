@@ -38,8 +38,8 @@ const BOT_PROFILES = {
   '00000000-0000-0000-0000-000000000006': { name: 'Ananya', avatar: 'assets/images/avatars/femaleavatar3.png' },
 };
 
-const TEAM_UP_TURN_ORDER = ['red', 'green', 'blue', 'yellow'];
-const SAFE_POSITIONS = [1, 9, 14, 22, 27, 35, 40, 48];
+const TEAM_UP_TURN_ORDER = ['red', 'green', 'yellow', 'blue'];
+const SAFE_POSITIONS = [9, 17, 22, 30, 35, 43, 48, 56];
 
 const BOARD_CONFIG = {
   4: { homePosition: 61, homeStretch: 52 },
@@ -278,22 +278,31 @@ async function handleTurnTimeout(roomId, tableName, expectedTurn) {
   if (isTableNonTeamUp(tableName)) {
     checkForKills(room, playerColor, chosen.newPos, newPositions);
   } else {
-    const safePositions = SAFE_POSITIONS;
+    const safePositions = getStarPositions(noOfPlayers) || SAFE_POSITIONS;
     if (chosen.newPos > 0 &&
         chosen.newPos < config.homeStretch &&
         !safePositions.includes(chosen.newPos)) {
       const botCoord = getCoordinateForPosition(playerColor, chosen.newPos, noOfPlayers);
       if (botCoord) {
-        for (const [otherColor, otherTokens] of Object.entries(newPositions)) {
-          if (otherColor === playerColor) continue;
+        const isTeamA = ['red', 'yellow'].includes(playerColor);
+        const opponentColors = isTeamA ? ['green', 'blue'] : ['red', 'yellow'];
+        const matches = [];
+
+        for (const otherColor of opponentColors) {
+          const otherTokens = newPositions[otherColor] || {};
           for (const [tokenName, tokenPos] of Object.entries(otherTokens)) {
             if (tokenPos > 0 && tokenPos < config.homeStretch) {
               const otherCoord = getCoordinateForPosition(otherColor, tokenPos, noOfPlayers);
               if (otherCoord && botCoord[0] === otherCoord[0] && botCoord[1] === otherCoord[1]) {
-                newPositions[otherColor][tokenName] = 0;
+                matches.push({ otherColor, tokenName });
               }
             }
           }
+        }
+
+        if (matches.length === 1) {
+          const victim = matches[0];
+          newPositions[victim.otherColor][victim.tokenName] = 0;
         }
       }
     }
@@ -386,7 +395,7 @@ function rollDice() {
 
 function getTurnOrderForRoom(noOfPlayers, tableName = DEFAULT_TABLES.teamUp) {
   if (tableName === DEFAULT_TABLES.teamUp) {
-    return ['red', 'green', 'blue', 'yellow'];
+    return TEAM_UP_TURN_ORDER;
   }
 
   if (noOfPlayers === 2) return ['blue', 'green'];
@@ -675,15 +684,18 @@ async function botMove(room, tableName) {
     madeKill = killResult.bonusRoll === true;
   } else {
     // Legacy team_up_rooms kill logic
-    const safePositions = SAFE_POSITIONS;
+    const safePositions = getStarPositions(noOfPlayers) || SAFE_POSITIONS;
     if (bestMove.newPos > 0 &&
         bestMove.newPos < config.homeStretch &&
         !safePositions.includes(bestMove.newPos)) {
       const botCoord = getCoordinateForPosition(botColor, bestMove.newPos, noOfPlayers);
       if (botCoord) {
+        const isTeamA = ['red', 'yellow'].includes(botColor);
+        const opponentColors = isTeamA ? ['green', 'blue'] : ['red', 'yellow'];
         const matches = [];
-        for (const [otherColor, otherTokens] of Object.entries(newPositions)) {
-          if (otherColor === botColor) continue;
+
+        for (const otherColor of opponentColors) {
+          const otherTokens = newPositions[otherColor] || {};
           for (const [tokenName, tokenPos] of Object.entries(otherTokens)) {
             if (tokenPos > 0 && tokenPos < config.homeStretch) {
               const otherCoord = getCoordinateForPosition(otherColor, tokenPos, noOfPlayers);
@@ -888,7 +900,7 @@ async function unsubscribeFromRoomInTable(roomId, tableName) {
 // BOT MANAGEMENT
 // ============================================
 
-async function addBotToRoom(roomId, botIndex = 0) {
+ async function addBotToRoom(roomId, botIndex = 0) {
   const botId = FIXED_BOT_IDS[botIndex % FIXED_BOT_IDS.length];
   
   const { data: room, error } = await supabaseAdmin
@@ -898,17 +910,55 @@ async function addBotToRoom(roomId, botIndex = 0) {
     .single();
   
   if (error || !room) throw new Error('Room not found');
-  if (room.players[botId]) return { botId, alreadyInRoom: true };
-  
-  const usedColors = Object.values(room.players);
-  const availableColors = TEAM_UP_TURN_ORDER.filter(c => !usedColors.includes(c));
-  if (availableColors.length === 0) throw new Error('Room is full');
-  
-  const botColor = availableColors[0];
-  const newPlayers = { ...room.players, [botId]: botColor };
-  const newTeamA = room.team_a.length < 2 ? [...room.team_a, botId] : room.team_a;
-  const newTeamB = room.team_a.length >= 2 ? [...room.team_b, botId] : room.team_b;
-  const newPositions = { ...room.positions, [botColor]: { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 } };
+
+  const teamA = room.team_a || [];
+  const teamB = room.team_b || [];
+  const currentPlayers = room.players || {};
+
+  if (teamA.includes(botId) || teamB.includes(botId) || currentPlayers[botId]) {
+    return { botId, alreadyInRoom: true };
+  }
+
+  if (teamA.length + teamB.length >= 4) throw new Error('Room is full');
+
+  const newTeamA = [...teamA];
+  const newTeamB = [...teamB];
+
+  const teamASpace = newTeamA.length < 2;
+  const teamBSpace = newTeamB.length < 2;
+  if (!teamASpace && !teamBSpace) throw new Error('Room is full');
+
+  const joinTeamA = teamASpace && (!teamBSpace || newTeamA.length <= newTeamB.length);
+  const botColor = joinTeamA
+    ? newTeamA.length === 0
+      ? 'red'
+      : 'yellow'
+    : newTeamB.length === 0
+      ? 'green'
+      : 'blue';
+
+  if (joinTeamA) {
+    newTeamA.push(botId);
+  } else {
+    newTeamB.push(botId);
+  }
+
+  const totalAfter = newTeamA.length + newTeamB.length;
+  let newPlayers = { ...currentPlayers, [botId]: botColor };
+  if (totalAfter === 4 && newTeamA.length === 2 && newTeamB.length === 2) {
+    newPlayers = {
+      ...newPlayers,
+      [newTeamA[0]]: 'red',
+      [newTeamA[1]]: 'yellow',
+      [newTeamB[0]]: 'green',
+      [newTeamB[1]]: 'blue',
+    };
+  }
+
+  const newPositions = { ...room.positions };
+  if (botColor && !newPositions[botColor]) {
+    newPositions[botColor] = { tokenA: 0, tokenB: 0, tokenC: 0, tokenD: 0 };
+  }
   
   await supabaseAdmin
     .from('team_up_rooms')
@@ -934,13 +984,22 @@ async function fillRoomWithBots(roomId) {
   
   if (error || !room) throw new Error('Room not found');
   
-  const currentPlayerCount = Object.keys(room.players).length;
-  const botsNeeded = 4 - currentPlayerCount;
+  const currentPlayerCount = (room.team_a || []).length + (room.team_b || []).length;
+  const botsNeeded = Math.max(0, 4 - currentPlayerCount);
   const addedBots = [];
   
   for (let i = 0; i < botsNeeded; i++) {
+    const totalPlayersNow = (room.team_a || []).length + (room.team_b || []).length;
+    if (totalPlayersNow >= 4) break;
+
     let botIndex = 0;
-    while (room.players[FIXED_BOT_IDS[botIndex]] && botIndex < FIXED_BOT_IDS.length) {
+    while (botIndex < FIXED_BOT_IDS.length) {
+      const candidate = FIXED_BOT_IDS[botIndex];
+      const alreadyUsed =
+        (room.team_a || []).includes(candidate) ||
+        (room.team_b || []).includes(candidate) ||
+        !!room.players?.[candidate];
+      if (!alreadyUsed) break;
       botIndex++;
     }
     if (botIndex >= FIXED_BOT_IDS.length) break;
@@ -954,12 +1013,16 @@ async function fillRoomWithBots(roomId) {
       .eq('room_id', roomId)
       .single();
     
-    if (updatedRoom) room.players = updatedRoom.players;
+    if (updatedRoom) {
+      room.team_a = updatedRoom.team_a;
+      room.team_b = updatedRoom.team_b;
+      room.players = updatedRoom.players;
+    }
   }
   
   console.log(` [BOT] Filled room ${roomId} with ${addedBots.length} bots`);
   return addedBots;
-}
+ }
 
 async function startBotPlayersForRoom(roomId) {
   console.log(` [BOT] Starting bot players for room ${roomId}`);

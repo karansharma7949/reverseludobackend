@@ -1,7 +1,7 @@
 import express from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticateUser } from '../middleware/auth.js';
-import { getBoardPosition } from '../utils/gameHelpers.js';
+import { getBoardPosition, getStarPositions } from '../utils/gameHelpers.js';
 
 import {
   recordKills,
@@ -245,7 +245,7 @@ async function _finalizeDisconnectRemoval(roomId, userId) {
 
 // Helper: Get next turn in anticlockwise order (red -> green -> blue -> yellow)
 function getNextTeamTurn(players, currentUserId) {
-  const turnOrder = ['red', 'green', 'blue', 'yellow'];
+  const turnOrder = ['red', 'green', 'yellow', 'blue'];
   const currentColor = players[currentUserId];
   
   if (!currentColor) return null;
@@ -551,7 +551,7 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     console.log(`🚀 [TEAM UP BACKEND] Moving ${color} ${tokenName} from ${currentPos} to ${newPos}`);
 
     const noOfPlayers = 4; // Team up is always 4 players
-    const safePositions = [9, 17, 22, 30, 35, 43, 48, 56];
+    const safePositions = getStarPositions(noOfPlayers) || [9, 17, 22, 30, 35, 43, 48, 56];
 
     // Update position
     const updatedPositions = { ...positions };
@@ -570,8 +570,8 @@ router.post('/:roomId/move-token', authenticateUser, async (req, res) => {
     const isOnSafeSpotForKills = safePositions.includes(newPos);
     
     if (!isOnSafeSpotForKills && newPos > 0 && newPos < 61 && movingTokenGridPos) {
-      const isTeamA = ['red', 'blue'].includes(color);
-      const opponentColors = isTeamA ? ['green', 'yellow'] : ['red', 'blue'];
+      const isTeamA = ['red', 'yellow'].includes(color);
+      const opponentColors = isTeamA ? ['green', 'blue'] : ['red', 'yellow'];
       const matches = [];
 
       for (const otherColor of opponentColors) {
@@ -1161,8 +1161,8 @@ router.post('/:roomId/bot-move-token', async (req, res) => {
         if (otherColor === color) continue;
         
         // Check if same team (Team A: red+blue, Team B: green+yellow)
-        const isTeamA = ['red', 'blue'].includes(color);
-        const otherIsTeamA = ['red', 'blue'].includes(otherColor);
+        const isTeamA = ['red', 'yellow'].includes(color);
+        const otherIsTeamA = ['red', 'yellow'].includes(otherColor);
         if (isTeamA === otherIsTeamA) continue; // Skip teammate
         
         for (const [otherTokenName, otherPos] of Object.entries(otherTokens)) {
@@ -1247,7 +1247,7 @@ function isBot(userId) {
 
 // Helper: Get next active player (skip escaped players)
 function getNextActivePlayer(players, escapedPlayers, currentUserId) {
-  const turnOrder = ['red', 'green', 'blue', 'yellow'];
+  const turnOrder = ['red', 'green', 'yellow', 'blue'];
   const currentColor = players[currentUserId];
   
   if (!currentColor) return null;
@@ -1280,7 +1280,6 @@ function areAllRemainingPlayersBots(players, escapedPlayers) {
   }
   return true; // All remaining are bots
 }
-
 // Import bot service
 import { startBotPlayersForRoom, stopBotPlayersForRoom } from '../services/botPlayerService.js';
 
@@ -1317,9 +1316,9 @@ router.post('/:roomId/start-game', authenticateUser, async (req, res) => {
     // Assign colors to players
     const players = {};
     if (room.team_a[0]) players[room.team_a[0]] = 'red';
-    if (room.team_a[1]) players[room.team_a[1]] = 'blue';
+    if (room.team_a[1]) players[room.team_a[1]] = 'yellow';
     if (room.team_b[0]) players[room.team_b[0]] = 'green';
-    if (room.team_b[1]) players[room.team_b[1]] = 'yellow';
+    if (room.team_b[1]) players[room.team_b[1]] = 'blue';
 
     // Set first turn (red always starts)
     const firstTurn = room.team_a[0];
