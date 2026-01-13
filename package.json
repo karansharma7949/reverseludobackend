@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "start:modular": "node server-modular.js",
-    "dev": "nodemon server.js",
+    "dev": "nodemon server-modular.js",
     "dev:modular": "nodemon server-modular.js"
   },
   "dependencies": {
