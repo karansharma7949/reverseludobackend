@@ -42,7 +42,7 @@ const TEAM_UP_TURN_ORDER = ['red', 'green', 'yellow', 'blue'];
 const SAFE_POSITIONS = [9, 17, 22, 30, 35, 43, 48, 56];
 
 const BOARD_CONFIG = {
-  4: { homePosition: 61, homeStretch: 52 },
+  4: { homePosition: 61, homeStretch: 57 },
   5: { homePosition: 73, homeStretch: 65 },
   6: { homePosition: 86, homeStretch: 78 },
 };
