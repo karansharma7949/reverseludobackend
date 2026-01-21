@@ -1300,12 +1300,12 @@ app.post('/api/game-rooms/:roomId/move-token', authenticateUser, async (req, res
   }
 });
 
-// Leave game room
 app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => {
   try {
     const { roomId } = req.params;
     const userId = req.user.id;
 
+    console.log(` PLAYER LEAVING GAME:`);
     console.log(`🚪 PLAYER LEAVING GAME:`);
     console.log(`   Room ID: ${roomId}`);
     console.log(`   Player ID: ${userId}`);
@@ -1403,12 +1403,37 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
       positions: updatedPositions,
     };
 
-    if (gameRoom.game_state === 'playing' && gameRoom.turn === userId) {
+    const shouldFinishTwoPlayerForfeit =
+      (tableName === 'game_rooms' || tableName === 'friend_rooms') &&
+      gameRoom.game_state === 'playing' &&
+      Number(gameRoom.no_of_players) === 2;
+
+    let finishedGameState = null;
+    let updatedWinners = null;
+    let forcedWinnerId = null;
+
+    if (shouldFinishTwoPlayerForfeit) {
+      const allPlayerIds = Object.keys(players);
+      const remainingActiveIds = allPlayerIds.filter(
+        (id) => id && !escapedPlayers.includes(id),
+      );
+
+      if (remainingActiveIds.length === 1) {
+        forcedWinnerId = remainingActiveIds[0];
+        finishedGameState = 'finished';
+        updatedWinners = [forcedWinnerId];
+        nextTurn = forcedWinnerId;
+        diceState = 'waiting';
+        diceResult = null;
+      }
+    }
+
+    if (!finishedGameState && gameRoom.game_state === 'playing' && gameRoom.turn === userId) {
       const playerIds = Object.keys(players);
       nextTurn = getNextTurn(playerIds, userId, players, roomForTurn);
       diceState = 'waiting';
       diceResult = null;
-    } else if (nextTurn && (roomForTurn.escaped_players || []).includes(nextTurn)) {
+    } else if (!finishedGameState && nextTurn && (roomForTurn.escaped_players || []).includes(nextTurn)) {
       const playerIds = Object.keys(players);
       nextTurn = getNextTurn(playerIds, nextTurn, players, roomForTurn);
       diceState = 'waiting';
@@ -1424,6 +1449,8 @@ app.post('/api/game-rooms/:roomId/leave', authenticateUser, async (req, res) => 
         turn: nextTurn,
         dice_state: diceState,
         dice_result: diceResult,
+        ...(finishedGameState ? { game_state: finishedGameState } : {}),
+        ...(updatedWinners ? { winners: updatedWinners } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq('room_id', roomId)

@@ -252,7 +252,30 @@ router.post('/:roomCode/leave', authenticateUser, async (req, res) => {
         positions: updatedPositions,
       };
 
-      if (friendRoom.turn === userId) {
+      const shouldFinishTwoPlayerForfeit =
+        friendRoom.game_state === 'playing' && Number(friendRoom.no_of_players) === 2;
+
+      let finishedGameState = null;
+      let updatedWinners = null;
+      let forcedWinnerId = null;
+
+      if (shouldFinishTwoPlayerForfeit) {
+        const allPlayerIds = Object.keys(players);
+        const remainingActiveIds = allPlayerIds.filter(
+          (id) => id && !escapedPlayers.includes(id),
+        );
+
+        if (remainingActiveIds.length === 1) {
+          forcedWinnerId = remainingActiveIds[0];
+          finishedGameState = 'finished';
+          updatedWinners = [forcedWinnerId];
+          nextTurn = forcedWinnerId;
+          diceState = 'waiting';
+          diceResult = null;
+        }
+      }
+
+      if (!finishedGameState && friendRoom.turn === userId) {
         const playerIds = Object.keys(players);
         nextTurn = getNextTurn(playerIds, userId, players, roomForTurn);
         diceState = 'waiting';
@@ -268,6 +291,8 @@ router.post('/:roomCode/leave', authenticateUser, async (req, res) => {
           turn: nextTurn,
           dice_state: diceState,
           dice_result: diceResult,
+          ...(finishedGameState ? { game_state: finishedGameState } : {}),
+          ...(updatedWinners ? { winners: updatedWinners } : {}),
           updated_at: new Date().toISOString(),
         })
         .eq('room_id', roomCode)
