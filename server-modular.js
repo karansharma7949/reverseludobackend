@@ -997,7 +997,9 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
         if (currentRoom && currentRoom.dice_state === 'rolling' && currentRoom.turn === userId) {
           const currentPendingSteps = currentRoom.pending_steps || {};
           // If pending steps already exist for this user, don't overwrite them.
-          if (currentPendingSteps[userId] && currentPendingSteps[userId] > 0) {
+          // FIX: Use !== undefined instead of > 0 to catch edge cases where
+          // /complete-dice has already set the value.
+          if (currentPendingSteps[userId] !== undefined && currentPendingSteps[userId] !== null) {
             // Pending steps already exist (likely set by /complete-dice). Make sure dice is marked complete.
             await supabaseAdmin
               .from(tableName)
@@ -1005,7 +1007,8 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
                 dice_state: 'complete',
                 updated_at: new Date().toISOString(),
               })
-              .eq('room_id', roomId);
+              .eq('room_id', roomId)
+              .eq('dice_state', 'rolling'); // ATOMIC: only if still rolling
             
             console.log(
               `🎲 Auto-complete resolved for room ${roomId} - pending steps already set (${currentPendingSteps[userId]}), dice_state forced to complete`,
@@ -1033,7 +1036,8 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
                 turn: nextTurn,
                 updated_at: new Date().toISOString(),
               })
-              .eq('room_id', roomId);
+              .eq('room_id', roomId)
+              .eq('dice_state', 'rolling'); // ATOMIC: only pass turn if still rolling
 
             console.log(
               `🎲 Auto-completed dice (no valid moves) for room ${roomId} with result ${resolvedDiceResult} - passed turn`,
@@ -1050,7 +1054,8 @@ app.post('/api/game-rooms/:roomId/roll-dice', authenticateUser, async (req, res)
               pending_steps: updatedPendingSteps,
               updated_at: new Date().toISOString(),
             })
-            .eq('room_id', roomId);
+            .eq('room_id', roomId)
+            .eq('dice_state', 'rolling'); // ATOMIC: only set if still rolling
 
           console.log(
             `🎲 Auto-completed dice for room ${roomId} with result ${resolvedDiceResult} (pending_steps set)`,
